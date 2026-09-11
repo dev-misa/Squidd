@@ -1,0 +1,52 @@
+HOW TO SHARE SQUIDD (macOS app) WITH A FRIEND
+
+Context:
+- App name: Squidd (Xcode project: Squidd.xcodeproj)
+- Native macOS SwiftUI app, App Sandbox enabled, automatic code signing
+- Minimum macOS version: macOS 26 (Tahoe). The friend's Mac must run macOS 26 or newer.
+- The app is NOT notarized, so macOS will show a security warning the first time it opens.
+- The app uses Spotify. The friend needs access to a Spotify developer app (mine or their own).
+- Spotify redirect URI: http://127.0.0.1:8888/callback
+- Spotify login uses a Client ID only (PKCE, no client secret).
+
+
+PART 1 - BUILD A COPY OF THE APP (on my Mac)
+1. Open Squidd.xcodeproj in Xcode.
+2. At the top of the window, set the run destination to "My Mac".
+3. In the menu bar, click Product > Archive and wait for the build to finish. The Organizer window opens on its own.
+4. Select the new archive and click "Distribute App".
+5. Choose "Custom", then "Copy App", then "Next", and save it somewhere easy like the Desktop.
+6. Open the saved folder. Inside is Squidd.app. Right-click it and choose "Compress Squidd" to get Squidd.zip.
+
+
+PART 2 - SEND IT
+7. Send Squidd.zip through AirDrop, Google Drive, iCloud Drive, Discord or similar.
+
+
+PART 3 - FRIEND OPENS IT
+8. Double-click the zip to unzip it, then drag Squidd.app into the Applications folder.
+9. Double-click Squidd. macOS says it "can't be opened" or "can't verify the developer." Click "Done" (NOT "Move to Trash").
+10. Go to System Settings > Privacy & Security, scroll down, click "Open Anyway" next to Squidd, and confirm with the Mac password.
+11. Squidd now opens normally every time.
+
+
+PART 4 - SPOTIFY ACCESS (pick one)
+
+Option A - Use my Spotify app (easier for the friend):
+1. Go to https://developer.spotify.com/dashboard and open my app.
+2. Open Settings > User Management. Add my friend's name and the email they use for Spotify.
+3. Send them my Client ID. It's safe to share, since the app doesn't use a secret.
+4. They open Squidd Settings, paste the Client ID, click "Connect Spotify", and log in.
+
+Option B - Friend makes their own Spotify app:
+1. They create an app at https://developer.spotify.com/dashboard
+2. They add this redirect URI exactly: http://127.0.0.1:8888/callback (must be 127.0.0.1, not localhost)
+3. They paste their own Client ID into Squidd Settings and click "Connect Spotify".
+4. The Spotify account that owns the developer app needs Premium.
+
+
+GOOD TO KNOW
+- Updates: every new version means repeating Parts 1-3.
+- Skipping the security warning: with a paid Apple Developer account ($99/year), choose "Direct Distribution" in step 5 instead of "Copy App". Xcode then notarizes the app with Apple, and the friend can open it without steps 9-10.
+- Spotify user limit: while my Spotify app is in development mode, only the few people I add in User Management can connect.
+- If Spotify login fails because port 8888 is busy, quit whatever app is using that port (like the old Electron app) and try again.
