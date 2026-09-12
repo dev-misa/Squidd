@@ -6,7 +6,7 @@ struct SquiddApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        MenuBarExtra("Squidd", systemImage: "music.note") {
+        MenuBarExtra("Squidd", image: "Squidd-SI") {
             Button("Show / Hide Player") { delegate.windows?.toggleCard() }
             Button("Settings…") { delegate.windows?.showSettings() }
                 .keyboardShortcut(",")

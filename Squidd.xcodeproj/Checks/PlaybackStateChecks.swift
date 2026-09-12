@@ -3,7 +3,10 @@ import Foundation
 @main
 enum PlaybackStateChecks {
     @MainActor static func main() async throws {
-        let store = AppStore()
+        // An inert stand-in for the Music app: with the real one these assertions would depend on whatever the
+        // machine happened to be playing.
+        let store = AppStore(defaults: .standard,
+                             appleMusic: AppleMusicPlayback(music: FakeMusic(), notifications: nil, workspace: nil))
         assert(!store.canControl && !store.isPlaying)
         store.seek(to: 100)
         assert(store.elapsed == 0)

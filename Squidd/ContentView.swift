@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 
 enum WidgetMetrics {
     static let card = CGSize(width: 316, height: 192)
@@ -119,7 +120,7 @@ struct LauncherView: View {
     var store: AppStore
     var body: some View {
         HStack(spacing: 7) {
-            bundledImage("squidd-logo", extension: "png")
+            bundledImage("Squiddv2", extension: "png", points: 40)
                 .scaledToFill().frame(width: 40, height: 40).clipShape(Circle())
             PreviewArtwork(store: store, radius: 10).frame(width: 40, height: 40)
             if let mascot = store.customMascotURL {
@@ -137,9 +138,14 @@ struct LauncherView: View {
         .accessibilityLabel("Squidd launcher")
     }
 
-    private func bundledImage(_ name: String, extension ext: String) -> Image {
-        if let url = Bundle.main.url(forResource: name, withExtension: ext), let image = NSImage(contentsOf: url) {
-            return Image(nsImage: image).resizable()
+    // Downsample once to the on-screen pixel size (2x for Retina); SwiftUI's live scaling of a large image looks jagged.
+    private func bundledImage(_ name: String, extension ext: String, points: CGFloat) -> Image {
+        let options = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: points * 2] as CFDictionary
+        if let url = Bundle.main.url(forResource: name, withExtension: ext),
+           let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+           let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options) {
+            let size = NSSize(width: CGFloat(cgImage.width) / 2, height: CGFloat(cgImage.height) / 2)
+            return Image(nsImage: NSImage(cgImage: cgImage, size: size)).resizable().interpolation(.high)
         }
         return Image(systemName: "music.note").resizable()
     }

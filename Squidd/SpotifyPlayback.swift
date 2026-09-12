@@ -37,11 +37,15 @@ final class SpotifyPlayback {
     private var commandMessageUntil: Date?
     private var lastTick = ProcessInfo.processInfo.systemUptime
     private var seekRollback: Double?
+    private let defaults: UserDefaults?
+    private static let retryKey = "spotifyPlaybackRetryAt"
 
+    /// `pollInterval` applies while a track plays; paused or idle polling runs at a third of that rate.
     init(auth: any SpotifySessionProviding, api: (any SpotifyPlaybackRequesting)? = nil,
-         images: (any SpotifyArtworkLoading)? = nil, pollInterval: Double = 1,
-         reconciliationDelay: Double = 0.4) {
+         images: (any SpotifyArtworkLoading)? = nil, pollInterval: Double = 5,
+         reconciliationDelay: Double = 0.4, defaults: UserDefaults? = nil) {
         self.auth = auth
+        self.defaults = defaults
         self.api = api ?? SpotifyPlaybackAPI(auth: auth)
         self.images = images ?? SpotifyArtworkCache()
         self.pollInterval = max(0.05, pollInterval)
@@ -112,13 +116,17 @@ final class SpotifyPlayback {
 
     private func sessionChanged() {
         cancelWork(clear: true)
-        halted = false; retryAt = nil; failures = 0
-        if auth.hasSession { start() }
+        halted = false; failures = 0
+        // Rate limits apply to the Client ID, so a pending wait outlives relaunches and reconnects.
+        retryAt = (defaults?.object(forKey: Self.retryKey) as? Date).flatMap { $0 > Date() ? $0 : nil }
+        guard auth.hasSession else { return }
+        if let retryAt { state = .rateLimited; message = Self.rateLimitMessage(until: retryAt) }
+        start()
     }
     private var enabled: Bool { auth.hasSession && !suspended && !previewing && !stopped }
     private func start() {
         guard enabled, worker == nil, !halted else { return }
-        state = .loading
+        if retryAt == nil || retryAt! <= Date() { state = .loading } // Keep showing a pending wait.
         let current = generation
         worker = Task { [weak self] in
             guard let self else { return }
@@ -147,12 +155,23 @@ final class SpotifyPlayback {
                 } else { await self.poll(current) }
                 guard self.valid(current) else { return }
                 if self.pending != nil { continue }
-                await self.sleep(self.pollInterval)
+                await self.sleep(self.nextPollDelay)
             }
             if self.generation == current { self.worker = nil }
         }
     }
     private func valid(_ current: UUID) -> Bool { generation == current && enabled && !Task.isCancelled }
+    /// Wakes near the end of a playing track so the next one shows promptly; polls rarely when nothing changes.
+    private var nextPollDelay: Double {
+        guard isPlaying else { return pollInterval * 3 }
+        guard duration > 0 else { return pollInterval }
+        return min(pollInterval, max(2, duration - elapsed + 0.5))
+    }
+    private static func rateLimitMessage(until date: Date) -> String {
+        let time = Calendar.current.isDateInToday(date) ? date.formatted(date: .omitted, time: .shortened)
+            : date.formatted(date: .abbreviated, time: .shortened)
+        return "Spotify rate limit · Retrying at \(time)"
+    }
     private func sleep(_ seconds: Double) async {
         guard !Task.isCancelled else { return }
         let current = generation
@@ -167,6 +186,7 @@ final class SpotifyPlayback {
             let value = try await api.snapshot()
             guard valid(current), startedAtRevision == revision else { return }
             failures = 0
+            if defaults?.object(forKey: Self.retryKey) != nil { defaults?.removeObject(forKey: Self.retryKey) }
             apply(value)
         } catch {
             guard valid(current) else { return }
@@ -206,7 +226,11 @@ final class SpotifyPlayback {
         let backoff = min(60, pow(2, Double(failures)))
         switch error {
         case SpotifyPlaybackError.rateLimited(let delay), SpotifyAuthError.retryAfter(let delay):
-            retryAt = Date().addingTimeInterval(delay); state = .rateLimited
+            let until = Date().addingTimeInterval(delay)
+            retryAt = until; state = .rateLimited
+            defaults?.set(until, forKey: Self.retryKey)
+            message = Self.rateLimitMessage(until: until)
+            return
         case SpotifyPlaybackError.quotaExceeded:
             halted = true; state = .quotaExceeded
         case SpotifyPlaybackError.forbidden:

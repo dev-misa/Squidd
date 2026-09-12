@@ -1,0 +1,61 @@
+APP NAME CHANGE
+===============
+
+Old name: MisaSpace / "Misa's Space" (this file is the only place the old name is kept)
+New name: Squidd
+Date:     2026-09-11
+
+
+Everything is now Squidd
+------------------------
+- Repo folder:          ~/Squidd
+- Xcode project:        Squidd.xcodeproj
+- Target and scheme:    Squidd
+- Source folder:        Squidd/
+- App entry file:       Squidd/SquiddApp.swift (struct SquiddApp)
+- App bundle:           Squidd.app (PRODUCT_NAME = Squidd)
+- Bundle identifier:    com.squidd
+- Keychain service:     com.squidd.spotify
+- Menu bar, Settings, Quit item, accessibility labels, Spotify auth page
+- Docs, check scripts, temp build paths (/tmp/squidd-*)
+- Electron reference copy (native-macos-handoff/Reference) removed; originals live in ~/misaspace
+
+
+Side effects of changing the bundle identifier
+----------------------------------------------
+macOS treats com.squidd as a brand-new app, so:
+- Settings start fresh (defaults are stored per bundle identifier).
+- Spotify must be reconnected once (tokens are in a new keychain service).
+- The app gets a new sandbox container.
+
+Leftovers already deleted (2026-09-11):
+- ~/Library/Preferences/com.misaspace-macos.plist (unused; sandboxed app reads its container)
+- ~/Library/Preferences/MisaSpace.AuthChecks.*.plist (empty, from old check runs)
+- /tmp/misaspace-* build output, check binaries, Swift cache, logs, phase1-4 staging copies
+- ~/Library/Developer/Xcode/DerivedData/misaspace-macos-*
+- Application Support/misaspace/misaspace-data.json.corrupt-* (stale broken backup)
+
+/Applications/Squidd.app replaced with the com.squidd build (2026-09-11).
+Spotify client ID, window position, outline setting and custom avatar were
+copied into ~/Library/Containers/com.squidd. Spotify needs one reconnect, and
+Launch at Login must be turned back on from the new app's menu.
+Deleted (no longer used by anything):
+- Keychain item com.misaspace-macos.spotify
+- Everything inside ~/Library/Containers/com.misaspace-macos
+- ~/Library/Application Scripts/com.misaspace-macos
+- ~/Library/Caches/com.misaspace-macos
+- ~/Library/HTTPStorages/com.misaspace-macos
+- Xcode archive "misaspace-macos 9-11-26, 10.40 AM" (build of the old app)
+
+macOS protects the container's metadata file, so an empty
+~/Library/Containers/com.misaspace-macos folder may remain. If it's still
+there, drag it to the Trash in Finder.
+
+Belongs to the old Electron app (~/misaspace), kept while that app exists:
+- ~/Library/Application Support/misaspace (ILLIT group/bias setup, ink log, tokens)
+- Keychain item "misaspace Safe Storage" (decrypts the Electron Spotify tokens)
+
+
+Still to do / notes
+-------------------
+- (add your notes here)

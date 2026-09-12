@@ -1,5 +1,9 @@
 # Spotify setup and live playback — native phases 3–4
 
+> Spotify is one of two backends. Apple Music needs no account or Client ID at all —
+> see [APPLE_MUSIC_SETUP.md](APPLE_MUSIC_SETUP.md). **Now Playing Source** in Settings
+> picks between them, or follows whichever is playing.
+
 This build connects your account and displays live track/episode metadata, shared
 artwork, progress and playback state. Previous, next, play/pause and seeking send
 commands to your active Spotify device. Playback preview remains separate sample
@@ -37,9 +41,12 @@ logout does not revoke Spotify account access; that can be managed at
 ## Playback behavior
 
 One serialized loop polls `GET /v1/me/player?additional_types=track,episode` every
-second after each completed request. This endpoint supplies metadata plus device
-restrictions without a second request. Controls honor restricted devices, tracks
-and disallowed actions. The poll interval is an internal constructor setting.
+five seconds while a track plays (sooner near its end, so the next track appears
+promptly) and every 15 seconds while paused or idle. Polling once a second tripped
+Spotify's rate limit for a development-mode app. This endpoint supplies metadata
+plus device restrictions without a second request. Controls honor restricted
+devices, tracks and disallowed actions. The poll interval is an internal
+constructor setting.
 
 Commands run in the same loop, ignore duplicate clicks while busy, reject responses
 that predate a command and reconcile after 400 ms. Seeking previews locally during
@@ -50,7 +57,8 @@ through a 40-entry LRU cache. Late results cannot replace newer artwork.
 
 HTTP 204 clears now-playing state. A 401 triggers one refresh/retry, then reconnect.
 403 pauses automatic polling and explains account/permission/Premium possibilities.
-404 offers Open Spotify. 429 honors Retry-After; QUOTA_EXCEEDED halts automatic
+404 offers Open Spotify. 429 honors Retry-After, shows the retry time, and saves it
+so relaunching during the wait does not contact Spotify early; QUOTA_EXCEEDED halts automatic
 requests. Settings provides an explicit Retry Playback action after resolving the
 underlying issue. Other failures use bounded backoff and keep credentials. Sleep,
 preview mode and logout cancel playback tasks; waking or leaving preview resumes

@@ -33,7 +33,7 @@ final class PlaybackTestAPI: SpotifyPlaybackRequesting {
     var held: CheckedContinuation<SpotifyPlaybackSnapshot?, Error>?
     var holdNext = false
     var commandFailure: Error?
-    var sent: [SpotifyPlaybackCommand] = []
+    var sent: [PlaybackCommand] = []
     var polls = 0
     var active = 0
     var maximumActive = 0
@@ -43,7 +43,7 @@ final class PlaybackTestAPI: SpotifyPlaybackRequesting {
         if holdNext { holdNext = false; return try await withCheckedThrowingContinuation { held = $0 } }
         return try next.get()
     }
-    func send(_ command: SpotifyPlaybackCommand) async throws {
+    func send(_ command: PlaybackCommand) async throws {
         active += 1; maximumActive = max(maximumActive, active)
         defer { active -= 1 }
         sent.append(command)
@@ -112,6 +112,7 @@ struct SpotifyPlaybackChecks {
         try await checkLifecycle()
         try await checkArtwork()
         try await checkProgressAndStaleArtwork()
+        try await checkPersistedRateLimit()
         print("Live playback checks passed: metadata variants, restrictions, API commands/401/204/403/404/429, serialized polling, stale-response rejection, seek rollback, quota halt, logout, sleep, preview, artwork LRU and decoding.")
     }
     @MainActor static func checkHTTP() async throws {
@@ -123,7 +124,7 @@ struct SpotifyPlaybackChecks {
         assert(empty == nil && auth.refreshes == 1)
         assert(PlaybackHTTPStub.requests.count == 2 && PlaybackHTTPStub.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer refreshed-test-token")
         PlaybackHTTPStub.reset(Array(repeating: .init(status: 204, data: Data()), count: 5))
-        for command: SpotifyPlaybackCommand in [.previous, .next, .play, .pause, .seek(12.345)] { try await api.send(command) }
+        for command: PlaybackCommand in [.previous, .next, .play, .pause, .seek(12.345)] { try await api.send(command) }
         let requests = PlaybackHTTPStub.requests
         assert(requests.map(\.httpMethod) == ["POST", "POST", "PUT", "PUT", "PUT"])
         assert(requests.map { $0.url!.lastPathComponent } == ["previous", "next", "play", "pause", "seek"])
@@ -251,6 +252,30 @@ struct SpotifyPlaybackChecks {
         assert(artPlayback.title == "Track two")
         artAuth.hasSession = false
         assert(artPlayback.artwork == nil && artPlayback.snapshot == nil)
+    }
+    @MainActor static func checkPersistedRateLimit() async throws {
+        let suite = "squidd-playback-checks-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let auth = PlaybackTestSession(), api = PlaybackTestAPI()
+        api.next = .failure(SpotifyPlaybackError.rateLimited(60))
+        let first = SpotifyPlayback(auth: auth, api: api, images: EmptyArtwork(), pollInterval: 0.05, defaults: defaults)
+        try await waitUntil { first.state == .rateLimited }
+        assert(first.artist.contains("Retrying at"))
+        first.stop()
+        // A relaunch during the wait must not contact Spotify again.
+        let polls = api.polls
+        let relaunched = SpotifyPlayback(auth: auth, api: api, images: EmptyArtwork(), pollInterval: 0.05, defaults: defaults)
+        try await Task.sleep(for: .milliseconds(150))
+        assert(api.polls == polls && relaunched.state == .rateLimited && relaunched.artist.contains("Retrying at"))
+        relaunched.stop()
+        // Once the wait has passed, a successful poll clears the saved deadline.
+        defaults.set(Date().addingTimeInterval(-1), forKey: "spotifyPlaybackRetryAt")
+        api.next = .success(try sample())
+        let recovered = SpotifyPlayback(auth: auth, api: api, images: EmptyArtwork(), pollInterval: 0.05, defaults: defaults)
+        defer { recovered.stop() }
+        try await waitUntil { recovered.state == .playing }
+        assert(defaults.object(forKey: "spotifyPlaybackRetryAt") == nil)
     }
 
 }

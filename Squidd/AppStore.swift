@@ -55,7 +55,7 @@ final class AppStore {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         spotify = SpotifyAuth(defaults: defaults)
-        playback = SpotifyPlayback(auth: spotify)
+        playback = SpotifyPlayback(auth: spotify, defaults: defaults)
         inkChoices = defaults.dictionary(forKey: "inkOverrides") as? [String: String] ?? [:]
         customMascotPath = defaults.string(forKey: "customMascotPath")
         rimPrimaryHex = defaults.string(forKey: "rimPrimaryHex")
