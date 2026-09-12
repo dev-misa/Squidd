@@ -90,7 +90,7 @@ final class WindowCoordinator: NSObject {
         workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.store.sleeping = true; self?.store.reconcileClock()
-                self?.store.playback.setSuspended(true)
+                self?.store.setSuspended(true)
                 self?.store.spotify.setSuspended(true)
                 self?.pointerTimer?.invalidate(); self?.pointerTimer = nil
                 self?.savePlacement()
@@ -100,8 +100,18 @@ final class WindowCoordinator: NSObject {
             MainActor.assumeIsolated {
                 self?.store.sleeping = false; self?.store.reconcileClock()
                 self?.store.spotify.setSuspended(false)
-                self?.store.playback.setSuspended(false)
+                self?.store.setSuspended(false)
+                self?.store.boostSources()
                 self?.recoverDisplay(); self?.startPointerTracking()
+            }
+        })
+        // Either player coming to the front usually means playback is about to change, so catch it quickly.
+        workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            MainActor.assumeIsolated {
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                guard let kind = MusicSourceKind.allCases.first(where: { $0.bundleIdentifier == app?.bundleIdentifier })
+                else { return }
+                self?.store.boost(kind)
             }
         })
     }
@@ -122,7 +132,10 @@ final class WindowCoordinator: NSObject {
 
     func toggleCard() {
         store.cardVisible.toggle()
-        if store.cardVisible { card.orderFrontRegardless() } else { card.orderOut(nil) }
+        if store.cardVisible {
+            card.orderFrontRegardless()
+            store.boostSources()
+        } else { card.orderOut(nil) }
     }
 
     func resetPosition() {
@@ -241,28 +254,41 @@ final class WindowCoordinator: NSObject {
 
     private func updatePointerPassthrough() {
         guard !interacting else { return }
-        for (panel, inset, radius) in [(launcher, CGFloat(14), CGFloat(26)), (card, CGFloat(6), CGFloat(24))] where panel.isVisible {
+        // The pill only fills part of its panel, and shrinks when there's no album art or mascot; anywhere outside it
+        // belongs to whatever is behind the launcher.
+        let pillWidth = WidgetMetrics.pillWidth(artwork: store.showsArtwork, mascot: store.customMascotURL != nil)
+        let launcherRect = CGRect(origin: .zero, size: launcher.frame.size)
+            .insetBy(dx: (launcher.frame.width - pillWidth) / 2, dy: (launcher.frame.height - WidgetMetrics.pillHeight) / 2)
+        let cardRect = CGRect(origin: .zero, size: card.frame.size).insetBy(dx: 6, dy: 6)
+        for (panel, rect, radius) in [(launcher, launcherRect, WidgetMetrics.pillHeight / 2), (card, cardRect, CGFloat(24))] where panel.isVisible {
             let point = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
-            let rect = CGRect(origin: .zero, size: panel.frame.size).insetBy(dx: inset, dy: inset)
             panel.ignoresMouseEvents = !NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).contains(point)
         }
     }
 
     func showSettings() {
         if settings == nil {
-            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 440, height: 650),
-                                  styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.isReleasedWhenClosed = false
-            for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { window.standardWindowButton(button)?.isHidden = true }
-            window.contentView = NSHostingView(rootView: SettingsView(store: store, close: { [weak window] in window?.orderOut(nil) }))
-            window.center()
+            let window = SettingsWindow(size: SettingsView.defaultSize)
+            let resize = SettingsResize(update: { [weak window] in window?.resize(from: $0) },
+                                        end: { [weak window] in window?.endResize() })
+            window.contentView = NSHostingView(rootView: SettingsView(store: store, close: { [weak window] in window?.orderOut(nil) },
+                                                                      resize: resize))
+            // Reopen at the size and place the panel was left at.
+            if !window.setFrameUsingName("SquiddSettingsFrame") { window.center() }
+            window.setFrameAutosaveName("SquiddSettingsFrame")
+            // A size saved before the minimum grew would cut content off; grow it back to the minimum.
+            let saved = window.frame, minimum = SettingsView.minimumSize
+            if saved.width < minimum.width || saved.height < minimum.height {
+                let size = NSSize(width: max(saved.width, minimum.width), height: max(saved.height, minimum.height))
+                window.setFrame(NSRect(x: saved.minX, y: saved.maxY - size.height, width: size.width, height: size.height), display: false)
+            }
             settings = window
         }
         store.loginStatus = SMAppService.mainApp.status
         NSApp.activate(ignoringOtherApps: true)
         settings?.makeKeyAndOrderFront(nil)
+        // The shadow follows the panel's rounded, transparent edges once it has drawn.
+        settings?.invalidateShadow()
     }
 
     func openDataFolder() {
@@ -308,7 +334,13 @@ final class PanelInteraction: NSView {
         return nil
     }
     override func resetCursorRects() {
-        if isLauncher { addCursorRect(bounds.insetBy(dx: 14, dy: 14), cursor: .openHand) }
+        if isLauncher {
+            // Match the pill, which narrows when there's no album art or mascot.
+            let width = coordinator.map { WidgetMetrics.pillWidth(artwork: $0.store.showsArtwork, mascot: $0.store.customMascotURL != nil) }
+                ?? WidgetMetrics.pillWidth(artwork: true, mascot: true)
+            addCursorRect(bounds.insetBy(dx: (bounds.width - width) / 2, dy: (bounds.height - WidgetMetrics.pillHeight) / 2),
+                          cursor: .openHand)
+        }
         else { for corner in CardCorner.allCases { addCursorRect(cornerRect(corner), cursor: .crosshair) } }
     }
     override func mouseDown(with event: NSEvent) {
@@ -323,7 +355,8 @@ final class PanelInteraction: NSView {
         if isLauncher {
             add("Show / Hide Player", #selector(toggle), to: menu)
             add("Settings…", #selector(settings), to: menu)
-            add("Open Spotify", #selector(openSpotify), to: menu)
+            add(coordinator?.store.activeKind == .appleMusic ? "Open Music" : "Open Spotify",
+                #selector(openPlayer), to: menu)
             if coordinator?.store.spotify.state == .connecting {
                 add("Cancel Spotify Login", #selector(cancelSpotify), to: menu)
             } else if coordinator?.store.spotify.hasSession == true {
@@ -363,7 +396,7 @@ final class PanelInteraction: NSView {
         guard let auth = coordinator?.store.spotify, SpotifyAuth.validClientID(auth.clientID) else { return }
         auth.connect()
     }
-    @objc private func openSpotify() { coordinator?.store.openSpotify() }
+    @objc private func openPlayer() { coordinator?.store.openActiveApp() }
     @objc private func disconnectSpotify() { coordinator?.store.spotify.disconnect() }
     @objc private func cancelSpotify() { coordinator?.store.spotify.cancelLogin() }
     @objc private func settings() { coordinator?.showSettings() }
@@ -371,7 +404,11 @@ final class PanelInteraction: NSView {
     @objc private func resetSize() { coordinator?.resetSize() }
     @objc private func reset() { coordinator?.resetPosition() }
     @objc private func dataFolder() { coordinator?.openDataFolder() }
-    @objc private func login() { coordinator?.store.toggleLogin(); coordinator?.showSettings() }
+    // The menu item's checkmark shows the state; Settings only opens to show a failure.
+    @objc private func login() {
+        coordinator?.store.toggleLogin()
+        if coordinator?.store.preferenceError != nil { coordinator?.showSettings() }
+    }
     @objc private func ink(_ sender: NSMenuItem) { coordinator?.store.setInk(InkMode.allCases[sender.tag]) }
     @objc private func forgetInk() { coordinator?.store.forgetInk() }
     @objc private func toggleOutline() { coordinator?.store.showCardOutline.toggle() }

@@ -25,10 +25,10 @@ final class GlobalHotKeys {
         guard status == noErr else { return ["Cannot install shortcuts (\(status))."] }
         let bindings: [(UInt32, UInt32, String)] = [
             (UInt32(kVK_ANSI_Slash), UInt32(cmdKey), "⌘/"),
-            (UInt32(kVK_ANSI_W), UInt32(cmdKey | controlKey), "⌘⌃W"),
-            (UInt32(kVK_ANSI_A), UInt32(cmdKey | controlKey), "⌘⌃A"),
-            (UInt32(kVK_ANSI_S), UInt32(cmdKey | controlKey), "⌘⌃S"),
-            (UInt32(kVK_ANSI_D), UInt32(cmdKey | controlKey), "⌘⌃D")
+            (UInt32(kVK_ANSI_W), UInt32(cmdKey | optionKey), "⌘⌥W"),
+            (UInt32(kVK_ANSI_A), UInt32(cmdKey | optionKey), "⌘⌥A"),
+            (UInt32(kVK_ANSI_S), UInt32(cmdKey | optionKey), "⌘⌥S"),
+            (UInt32(kVK_ANSI_D), UInt32(cmdKey | optionKey), "⌘⌥D")
         ]
         var errors: [String] = []
         for (index, binding) in bindings.enumerated() {

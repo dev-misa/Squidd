@@ -62,7 +62,7 @@ struct SpotifyPlaybackSnapshot: Decodable, Sendable {
         if currently_playing_type == "ad" { return "Advertisement" }
         return item?.name ?? (is_playing == true ? "Playback unavailable" : "Nothing playing")
     }
-    func permits(_ command: SpotifyPlaybackCommand) -> Bool {
+    func permits(_ command: PlaybackCommand) -> Bool {
         guard device?.is_active == true, device?.is_restricted != true,
               item != nil, item?.is_playable != false, item?.restrictions == nil,
               ["track", "episode"].contains(item?.type ?? currently_playing_type ?? ""),
@@ -72,8 +72,8 @@ struct SpotifyPlaybackSnapshot: Decodable, Sendable {
     }
 }
 
-enum SpotifyPlaybackCommand: Equatable, Sendable {
-    case play, pause, previous, next, seek(Double)
+/// How the shared transport actions map onto Spotify's player endpoints and its `disallows` vocabulary.
+extension PlaybackCommand {
     var restriction: String {
         switch self {
         case .play: "resuming"
@@ -113,7 +113,7 @@ enum SpotifyPlaybackError: Error, LocalizedError {
 @MainActor
 protocol SpotifyPlaybackRequesting {
     func snapshot() async throws -> SpotifyPlaybackSnapshot?
-    func send(_ command: SpotifyPlaybackCommand) async throws
+    func send(_ command: PlaybackCommand) async throws
 }
 
 @MainActor
@@ -138,7 +138,7 @@ final class SpotifyPlaybackAPI: SpotifyPlaybackRequesting {
         do { return try JSONDecoder().decode(SpotifyPlaybackSnapshot.self, from: data) }
         catch { throw SpotifyPlaybackError.malformed }
     }
-    func send(_ command: SpotifyPlaybackCommand) async throws {
+    func send(_ command: PlaybackCommand) async throws {
         var query: [URLQueryItem] = []
         if case .seek(let seconds) = command {
             guard seconds.isFinite, seconds >= 0, seconds < Double(Int.max) / 1000 else { throw SpotifyPlaybackError.malformed }

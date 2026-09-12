@@ -5,6 +5,25 @@ import ImageIO
 enum WidgetMetrics {
     static let card = CGSize(width: 316, height: 192)
     static let launcher = CGSize(width: 169, height: 80)
+
+    // Launcher pill. The logo always shows; album art and the mascot join it only when there's something to draw,
+    // so with neither the pill is as wide as it is tall and reads as a circle around the logo.
+    static let pillHeight: CGFloat = 52
+    static let pillSpacing: CGFloat = 7
+    static let pillLeading: CGFloat = 6
+    static let logoSize: CGFloat = 40
+    static let artSize: CGFloat = 40
+    static let mascotSize: CGFloat = 35
+
+    /// Without a mascot, extra trailing room keeps the art's corners as far from the pill's curve as the logo is.
+    static func pillTrailing(artwork: Bool, mascot: Bool) -> CGFloat { artwork && !mascot ? 16 : pillLeading }
+
+    static func pillWidth(artwork: Bool, mascot: Bool) -> CGFloat {
+        var width = pillLeading + logoSize
+        if artwork { width += pillSpacing + artSize }
+        if mascot { width += pillSpacing + mascotSize }
+        return width + pillTrailing(artwork: artwork, mascot: mascot)
+    }
 }
 
 struct NativeGlass: ViewModifier {
@@ -61,11 +80,14 @@ struct ContentView: View {
                 }
             }.frame(maxHeight: .infinity)
             HStack(spacing: 9) {
-                Text(time(store.elapsed))
-                SeekBarView(elapsed: store.elapsed, duration: store.shownDuration, enabled: store.canSeek) { store.seek(to: $0) }
-                    .id(store.trackIdentity)
-                Text(time(store.shownDuration))
+                if store.showsTimeline {
+                    Text(time(store.elapsed))
+                    SeekBarView(elapsed: store.elapsed, duration: store.shownDuration, enabled: store.canSeek) { store.seek(to: $0) }
+                        .id(store.trackIdentity)
+                    Text(time(store.shownDuration))
+                }
             }
+            .frame(height: 9)
             .font(.system(size: 9, weight: .bold).monospacedDigit())
             .padding(.bottom, 28)
         }
@@ -95,7 +117,7 @@ struct ContentView: View {
     }
 
     private func transport(_ kind: TransportGlyph.Kind, label: String) -> some View {
-        let command: SpotifyPlaybackCommand = switch kind {
+        let command: PlaybackCommand = switch kind {
         case .previous: .previous
         case .next: .next
         case .pause: .pause
@@ -118,18 +140,31 @@ struct ArtworkPlaceholder: View {
 
 struct LauncherView: View {
     var store: AppStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        HStack(spacing: 7) {
-            bundledImage("Squiddv2", extension: "png", points: 40)
-                .scaledToFill().frame(width: 40, height: 40).clipShape(Circle())
-            PreviewArtwork(store: store, radius: 10).frame(width: 40, height: 40)
-            if let mascot = store.customMascotURL {
-                AnimatedMascotView(playing: store.isPlaying && !store.sleeping, customURL: mascot).frame(width: 35, height: 35)
+        let artwork = store.showsArtwork
+        let mascot = store.customMascotURL
+        return HStack(spacing: WidgetMetrics.pillSpacing) {
+            bundledImage("Squiddv2", extension: "png", points: WidgetMetrics.logoSize)
+                .scaledToFill().frame(width: WidgetMetrics.logoSize, height: WidgetMetrics.logoSize).clipShape(Circle())
+            if artwork {
+                PreviewArtwork(store: store, radius: 10)
+                    .frame(width: WidgetMetrics.artSize, height: WidgetMetrics.artSize)
+                    // Grows out of the logo's edge as the pill widens, rather than appearing at full size.
+                    .transition(.scale(scale: 0.6, anchor: .leading).combined(with: .opacity))
+            }
+            if let mascot {
+                AnimatedMascotView(playing: store.isPlaying && !store.sleeping, customURL: mascot)
+                    .frame(width: WidgetMetrics.mascotSize, height: WidgetMetrics.mascotSize)
             }
         }
-        // Without a mascot, extra trailing room keeps the art's corners as far from the pill's curve as the logo is.
-        .padding(.leading, 6).padding(.trailing, store.customMascotURL == nil ? 16 : 6).frame(height: 52)
-        .modifier(NativeGlass(radius: 26))
+        .padding(.leading, WidgetMetrics.pillLeading)
+        .padding(.trailing, WidgetMetrics.pillTrailing(artwork: artwork, mascot: mascot != nil))
+        .frame(height: WidgetMetrics.pillHeight)
+        .modifier(NativeGlass(radius: WidgetMetrics.pillHeight / 2))
+        // The circle stretches into the pill (and back) as album art and the mascot come and go.
+        .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: artwork)
+        .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: mascot)
         .overlay { PlaybackRim(playing: store.isPlaying && !store.sleeping, primaryColor: store.rimPrimaryColor, accentColor: store.rimAccentColor) }
         .padding(14)
         // Fill the fixed launcher panel so the pill stays centered over the card at either width.

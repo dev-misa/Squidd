@@ -1,163 +1,468 @@
 import SwiftUI
-import ServiceManagement
 import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 
+/// Edge- and corner-drag callbacks into the settings window.
+struct SettingsResize {
+    var update: (SettingsWindow.Handle) -> Void = { _ in }
+    var end: () -> Void = {}
+}
+
+// Borderless so Settings can draw its own rounded glass panel; still becomes key so the Client ID field accepts typing.
+@MainActor
+final class SettingsWindow: NSWindow {
+    enum Handle {
+        case top, bottom, leading, trailing, topLeading, topTrailing, bottomLeading, bottomTrailing
+
+        var changesWidth: Bool { self != .top && self != .bottom }
+        var changesHeight: Bool { self != .leading && self != .trailing }
+        /// Dragging from the panel's right side or its bottom, so the opposite side is the one that stays put.
+        var fromTrailing: Bool { self == .trailing || self == .topTrailing || self == .bottomTrailing }
+        var fromBottom: Bool { self == .bottom || self == .bottomLeading || self == .bottomTrailing }
+    }
+
+    private var resizeStart: (frame: NSRect, mouse: NSPoint)?
+
+    init(size: CGSize) {
+        super.init(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        isOpaque = false
+        backgroundColor = .clear
+        // macOS builds the shadow from the square window surface, which leaves marks outside the rounded corners.
+        hasShadow = false
+        isReleasedWhenClosed = false
+        appearance = NSAppearance(named: .darkAqua)
+    }
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    // The opposite edge or corner stays put. Screen coordinates are used so the moving window doesn't feed back
+    // into the drag. An edge handle changes only its own dimension.
+    func resize(from handle: Handle) {
+        let mouse = NSEvent.mouseLocation
+        if resizeStart == nil { resizeStart = (frame, mouse) }
+        guard let start = resizeStart else { return }
+        let limit = (screen ?? NSScreen.main)?.visibleFrame.size ?? CGSize(width: 10_000, height: 10_000)
+        let dx = mouse.x - start.mouse.x, dy = mouse.y - start.mouse.y
+        // Screen y grows upward, so dragging the bottom downwards makes the panel taller.
+        let width = handle.changesWidth
+            ? min(max(start.frame.width + (handle.fromTrailing ? dx : -dx), SettingsView.minimumSize.width), limit.width)
+            : start.frame.width
+        let height = handle.changesHeight
+            ? min(max(start.frame.height + (handle.fromBottom ? -dy : dy), SettingsView.minimumSize.height), limit.height)
+            : start.frame.height
+        let origin = NSPoint(x: handle.changesWidth && !handle.fromTrailing ? start.frame.maxX - width : start.frame.minX,
+                             y: handle.changesHeight && handle.fromBottom ? start.frame.maxY - height : start.frame.minY)
+        setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true)
+        invalidateShadow()
+    }
+
+    func endResize() {
+        resizeStart = nil
+        invalidateShadow()
+    }
+}
+
+// Built from the Figma design (a 440 × 950 pt panel). The logo and title stay centered; everything below is
+// left-aligned so every line starts on one edge. Resizing only changes the space between sections, and the
+// minimum size always fits everything.
 struct SettingsView: View {
+    static let defaultSize = CGSize(width: 440, height: 690)
+    // 440 wide is the design width: the Spotify ID row needs 411 pt plus its left margin, so anything narrower clips.
+    static let minimumSize = CGSize(width: 440, height: 690)
+    fileprivate static let columnWidth: CGFloat = 440
+    /// Every line starts here, matching the Spotify logo's left edge in the design (x 62 of 440).
+    fileprivate static let leadingInset: CGFloat = 62
+
     @Bindable var store: AppStore
     var close: () -> Void
+    var resize = SettingsResize()
     @State private var clientID = ""
     @State private var copiedRedirect = false
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    private let panelShape = RoundedRectangle(cornerRadius: SettingsStyle.cornerRadius)
 
     var body: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Text("Squidd").font(.title2.bold())
-                Spacer()
-                Button("Done", action: close).keyboardShortcut(.cancelAction)
-            }
-            spotifySetup
-            Divider()
-            mascotSetup
-            Divider()
-            ringSetup
-            Divider()
-            VStack(alignment: .leading, spacing: 6) {
-                Toggle("Show dashed outline around player", isOn: $store.showCardOutline)
-                Text("The dashed border drawn around the player card.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Playback preview").font(.headline)
-                Picker("Preview", selection: Binding(get: { store.preview }, set: { store.selectPreview($0) })) {
-                    ForEach(PreviewState.allCases) { Text($0.rawValue).tag($0) }
-                }
-                Text("Sample data only. No music plays and no Spotify commands are sent.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Global shortcuts").font(.headline)
-                Text("⌘/  Show or hide player\n⌘⌃W / A / S / D  Move up / left / down / right")
-                    .font(.callout)
-                ForEach(store.shortcutErrors, id: \.self) { Text($0).font(.caption).foregroundStyle(.red) }
-            }
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Launch at Login").font(.headline)
-                    Text(store.loginDescription).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button(store.loginStatus == .enabled ? "Disable" : "Enable") { store.toggleLogin() }
-            }
-            if let error = store.preferenceError { Text(error).font(.caption).foregroundStyle(.red) }
-            Text("Drag the launcher to move. Drag any card corner to resize. Right-click either panel for its menu.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        .padding(24).frame(width: 440)
-        }
-        .frame(width: 440, height: 650)
-        .onAppear { clientID = store.spotify.clientID }
+        column
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipShape(panelShape)
+            .background { background }
+            .overlay(alignment: .topLeading) { closeButton.padding(.leading, 22).padding(.top, 19) }
+            // Press and drag anywhere to move the panel; a plain click still reaches buttons and the text field.
+            .simultaneousGesture(WindowDragGesture())
+            .allowsWindowActivationEvents(true)
+            .overlay { resizeHandles }
+            .foregroundStyle(.white)
+            .environment(\.colorScheme, .dark)
+            .onAppear { clientID = store.spotify.clientID }
     }
 
-    private var spotifySetup: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Spotify").font(.headline)
-            Text(store.spotify.status).font(.callout)
-                .accessibilityIdentifier("spotifyConnectionStatus")
-            TextField("Spotify Client ID", text: $clientID)
-                .textFieldStyle(.roundedBorder)
+    // MARK: Layout
+
+    private var column: some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(height: 31)
+            header
+            gap
+            spotifyID
+            gap
+            spotifyConnect
+            gap
+            appleMusicSection
+            gap
+            mascot
+            gap
+            accent
+            gap
+            outline
+            // Keeps the commands near the checkbox; leftover height collects at the bottom instead.
+            Spacer(minLength: 16).frame(maxHeight: 40)
+            shortcuts
+            Spacer(minLength: 32)
+        }
+    }
+
+    private var gap: some View { Spacer(minLength: 16) }
+
+    /// Lines stacked flush left, all starting on the same edge.
+    private func leadingColumn<Content: View>(spacing: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: spacing) { content() }
+            .fixedSize()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, Self.leadingInset)
+    }
+
+    /// Fixed horizontal space inside a row, taken from the design.
+    private func space(_ width: CGFloat) -> some View { Color.clear.frame(width: width, height: 1) }
+
+    // MARK: Chrome
+
+    private var background: some View {
+        ZStack {
+            if reduceTransparency {
+                panelShape.fill(SettingsStyle.panel)
+                panelShape.strokeBorder(.white.opacity(0.16), lineWidth: 1)
+            } else {
+                Color.clear.glassEffect(.regular, in: panelShape)
+            }
+            // Near-clear layer so empty panel areas still receive the drag.
+            panelShape.fill(.white.opacity(0.001))
+        }
+    }
+
+    private var closeButton: some View {
+        Button(action: close) {
+            Image(systemName: "xmark").font(SettingsStyle.font(13, .semibold))
+                .frame(width: 25, height: 25)
+                .background(Circle().fill(.white.opacity(0.14)))
+                .overlay(Circle().strokeBorder(.white.opacity(0.28), lineWidth: 1))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.cancelAction)
+        .accessibilityLabel("Close Settings")
+    }
+
+    private var resizeHandles: some View {
+        ZStack {
+            // Edges first; the corner handles sit on top of their ends.
+            edgeHandle(.top, .top, .top)
+            edgeHandle(.bottom, .bottom, .bottom)
+            edgeHandle(.leading, .leading, .leading)
+            edgeHandle(.trailing, .trailing, .trailing)
+            cornerHandle(.topLeading, .topLeading, .topLeading)
+            cornerHandle(.topTrailing, .topTrailing, .topTrailing)
+            cornerHandle(.bottomLeading, .bottomLeading, .bottomLeading)
+            cornerHandle(.bottomTrailing, .bottomTrailing, .bottomTrailing)
+        }
+        // Keep the handles inside the rounded panel so the window's shadow follows the curve, not a rectangle.
+        .clipShape(panelShape)
+    }
+
+    private func cornerHandle(_ handle: SettingsWindow.Handle, _ alignment: Alignment, _ position: FrameResizePosition) -> some View {
+        grip(handle, position)
+            .frame(width: 36, height: 36)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
+    }
+
+    /// A strip along one edge, stopping short of the corners so the corner handles keep their area.
+    private func edgeHandle(_ handle: SettingsWindow.Handle, _ alignment: Alignment, _ position: FrameResizePosition) -> some View {
+        let vertical = handle == .leading || handle == .trailing
+        return grip(handle, position)
+            .frame(width: vertical ? 8 : nil, height: vertical ? nil : 8)
+            .padding(vertical ? [.top, .bottom] : [.leading, .trailing], 36)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
+    }
+
+    private func grip(_ handle: SettingsWindow.Handle, _ position: FrameResizePosition) -> some View {
+        // Clear: the glass behind already makes these spots clickable, and a fill would show at the corners.
+        Color.clear
+            .contentShape(Rectangle())
+            .pointerStyle(.frameResize(position: position))
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { _ in resize.update(handle) }
+                .onEnded { _ in resize.end() })
+            .accessibilityHidden(true)
+    }
+
+    // MARK: Sections
+
+    // Just the centered logo; it carries the panel's name for VoiceOver since there's no visible title.
+    private var header: some View {
+        Image("Squidd-Red-Logo").resizable().frame(width: 52, height: 53)
+            .frame(maxWidth: .infinity)
+            .accessibilityLabel("Squidd Settings")
+    }
+
+    private var spotifyNote: String? {
+        store.spotify.message ?? (store.spotify.hasSession ? store.playback.message : nil)
+    }
+
+    // Keeps the design's layout (x 62–411 of 440, y from the field's top), anchored to the panel's left edge.
+    private var spotifyID: some View {
+        let height: CGFloat = spotifyNote == nil ? 56 : 84
+        return ZStack(alignment: .topLeading) {
+            VStack(spacing: 4) {
+                Image("Spotify-Logo").resizable().frame(width: 20, height: 20)
+                    .accessibilityHidden(true)
+                Text("Spotify").font(SettingsStyle.font(11.25))
+            }
+            .frame(width: 60)
+            .place(x: 62, y: 10.8)
+
+            TextField("", text: $clientID, prompt: Text("Spotify Client ID").foregroundStyle(.white.opacity(0.35)))
+                .textFieldStyle(.plain)
+                .font(SettingsStyle.font(10))
                 .autocorrectionDisabled()
+                .onSubmit { _ = store.spotify.saveClientID(clientID) }
+                .padding(.horizontal, 12)
+                .frame(width: 246, height: 29)
+                .background(SettingsStyle.field, in: RoundedRectangle(cornerRadius: 9))
+                .accessibilityLabel("Spotify Client ID")
                 .accessibilityIdentifier("spotifyClientID")
-            HStack {
-                Button("Save Client ID") { _ = store.spotify.saveClientID(clientID) }
+                .place(x: 131.5, y: 0)
+            InfoButton(text: "Paste the Client ID from your Spotify app, then click Save ID. You'll find it in the Developer Dashboard.\n\nDevelopment apps need a Premium app owner, and your Spotify account must be on the app's allowed-user list.")
+                .place(x: 395, centerY: 14.5, height: 16)
+
+            HStack(spacing: 0) {
+                Button("Save ID") { _ = store.spotify.saveClientID(clientID) }
+                    .buttonStyle(PillStyle(fill: SettingsStyle.gray, width: 40))
                     .disabled(clientID.trimmingCharacters(in: .whitespacesAndNewlines) == store.spotify.clientID)
-                Link("Developer Dashboard", destination: URL(string: "https://developer.spotify.com/dashboard")!)
-            }
-            Text("Register this redirect URI in your Spotify app:")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Text(SpotifyAuth.redirectURI).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                Spacer()
-                Button(copiedRedirect ? "Copied" : "Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(SpotifyAuth.redirectURI, forType: .string)
-                    copiedRedirect = true
-                }.accessibilityLabel("Copy Spotify redirect URI")
-            }
-            HStack {
-                if store.spotify.state == .connecting {
-                    ProgressView().controlSize(.small)
-                    Button("Cancel Login") { store.spotify.cancelLogin() }
-                } else {
-                    Button(store.spotify.hasSession ? "Reconnect Spotify" : "Connect Spotify") {
-                        guard store.spotify.saveClientID(clientID) else { return }
-                        store.selectPreview(.off)
-                        store.spotify.connect()
-                    }.buttonStyle(.borderedProminent)
-                    Button("Disconnect") { store.spotify.disconnect() }
+                Spacer(minLength: 8)
+                Text(statusText).font(SettingsStyle.font(7.5, .regular)).lineLimit(1).truncationMode(.tail)
+                    .accessibilityIdentifier("spotifyConnectionStatus")
+                Spacer(minLength: 8)
+                Button { NSWorkspace.shared.open(URL(string: "https://developer.spotify.com/dashboard")!) } label: {
+                    Text("Developer Dashboard").font(SettingsStyle.font(8.5)).foregroundStyle(SettingsStyle.link)
                 }
+                .buttonStyle(.plain)
+                .pointerStyle(.link)
             }
-            if let message = store.spotify.message {
-                Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            .frame(width: 245.5)
+            .place(x: 131.5, centerY: 46)
+
+            if let note = spotifyNote {
+                Text(note).font(SettingsStyle.font(8, .regular)).foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(2).textSelection(.enabled)
+                    .frame(width: 246, alignment: .leading)
+                    .place(x: 131.5, y: 63)
             }
-            Text("Development apps require a Premium app owner and your Spotify account on the app’s allowed-user list.")
-                .font(.caption).foregroundStyle(.secondary)
-            if store.spotify.hasSession {
-                Text(store.playback.message ?? store.playback.status).font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Open Spotify") { store.openSpotify() }
-                    Button("Retry Playback") { store.playback.retry() }.disabled(!store.playback.canRetry)
+        }
+        .frame(width: Self.columnWidth, height: height, alignment: .topLeading)
+        .offset(x: -62)
+        .frame(width: 411 - 62, height: height, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, Self.leadingInset)
+    }
+
+    private var spotifyConnect: some View {
+        leadingColumn(spacing: 0) {
+            HStack(spacing: 0) {
+                Text(SpotifyAuth.redirectURI).font(SettingsStyle.font(8.75)).lineLimit(1).textSelection(.enabled)
+                space(10)
+                Button(action: copyRedirect) {
+                    Image(systemName: copiedRedirect ? "checkmark" : "square.on.square").font(SettingsStyle.font(12))
+                        .frame(width: 18, height: 18).contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Copy Spotify redirect URI")
+                space(12.8)
+                connectButton
+                space(16.6)
+                Button("Disconnect") { store.spotify.disconnect() }
+                    .buttonStyle(PillStyle(fill: SettingsStyle.gray, width: 59))
+                space(12)
+                InfoButton(text: "Register this redirect URI in your Spotify app. Copy puts it on the clipboard.\n\nMusic plays in Spotify on your active device; Squidd shows and controls that playback.\n\nDisconnect removes this Mac's saved login. You can also remove access at spotify.com/account/apps.")
             }
-            Text("Music plays in Spotify on your active device. This widget displays and controls that playback.")
-                .font(.caption).foregroundStyle(.secondary)
-            if store.spotify.hasSession {
-                Text("Disconnect removes this Mac’s saved login. Account access can also be removed at spotify.com/account/apps.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            .frame(height: 18)
         }
     }
 
-    private var mascotSetup: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Mascot").font(.headline)
-            HStack(spacing: 10) {
-                mascotPreview.frame(width: 32, height: 32).clipShape(RoundedRectangle(cornerRadius: 6))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Mascot (GIF or image)").font(.callout)
-                    HStack {
-                        Button("Choose GIF or Image…") { pickMascot() }
-                        if store.customMascotPath != nil { Button("Remove") { store.resetCustomMascot() } }
-                    }
-                }
+    @ViewBuilder private var connectButton: some View {
+        if store.spotify.state == .connecting {
+            Button("Cancel") { store.spotify.cancelLogin() }
+                .buttonStyle(PillStyle(fill: SettingsStyle.gray, width: 59))
+                .accessibilityLabel("Cancel Spotify login")
+        } else {
+            Button(store.spotify.hasSession ? "Reconnect" : "Connect") {
+                guard store.spotify.saveClientID(clientID) else { return }
+                store.selectPreview(.off)
+                store.spotify.connect()
             }
-            Text("Shown on the launcher next to the album art. The Squidd logo always stays; leave this empty to show just the logo and album art.")
-                .font(.caption).foregroundStyle(.secondary)
+            .buttonStyle(PillStyle(fill: SettingsStyle.blue, width: 59))
         }
     }
 
-    private var ringSetup: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Playback ring").font(.headline)
-            HStack(spacing: 16) {
-                ColorPicker("Primary", selection: Binding(
-                    get: { store.rimPrimaryColor },
-                    set: { store.setRimColors(primary: $0, accent: store.rimAccentColor) }
-                ), supportsOpacity: false)
-                ColorPicker("Highlight", selection: Binding(
-                    get: { store.rimAccentColor },
-                    set: { store.setRimColors(primary: store.rimPrimaryColor, accent: $0) }
-                ), supportsOpacity: false)
-                Spacer()
-                if store.rimPrimaryHex != nil || store.rimAccentHex != nil {
-                    Button("Reset") { store.resetRimColors() }
-                }
+    private var statusText: String {
+        store.spotify.state == .disconnected ? "Not Connected to Spotify" : store.spotify.status
+    }
+
+    // MARK: Apple Music
+
+    /// Apple Music needs no account setup — only the macOS Automation permission that lets Squidd talk to the
+    /// Music app — so this section is a source picker plus whatever single step is outstanding.
+    private var appleMusicSection: some View {
+        leadingColumn(spacing: 14) {
+            Text("Now Playing Source").font(SettingsStyle.font(10, .semibold))
+            HStack(spacing: 0) {
+                sourcePill(nil, "Automatic")
+                space(8)
+                sourcePill(.spotify, "Spotify")
+                space(8)
+                sourcePill(.appleMusic, "Apple Music")
+                space(12)
+                InfoButton(text: "Automatic follows whichever app is playing, and keeps showing the last one while both are paused.\n\nSpotify or Apple Music pins the card to that service.")
             }
-            Text("Colors of the glowing ring around the launcher while music plays.")
-                .font(.caption).foregroundStyle(.secondary)
+            .frame(height: 18)
+            HStack(spacing: 0) {
+                Text(appleMusicStatus).font(SettingsStyle.font(8.75)).lineLimit(1).truncationMode(.tail)
+                    .frame(width: 196, alignment: .leading)
+                    .accessibilityIdentifier("appleMusicStatus")
+                space(10)
+                appleMusicButton
+                space(12)
+                InfoButton(text: "Apple Music needs no Client ID or login. macOS asks once for permission to control the Music app; Squidd then shows and controls whatever Music is playing.\n\nWithout that permission the track still appears, but the buttons stay off.")
+            }
+            .frame(height: 18)
+        }
+    }
+
+    private func sourcePill(_ kind: MusicSourceKind?, _ label: String) -> some View {
+        let selected = store.sourcePreference == kind
+        return Button(label) { store.sourcePreference = kind }
+            .buttonStyle(PillStyle(fill: selected ? SettingsStyle.blue : SettingsStyle.gray, width: 66))
+            .accessibilityLabel("\(label) source")
+            .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
+    private var appleMusicStatus: String {
+        switch store.appleMusic.permission {
+        case .granted: store.appleMusic.status
+        case .notDetermined: "Permission needed to read and control Music"
+        case .denied: "Denied in Privacy & Security › Automation"
+        case .musicNotRunning: "Music isn’t running"
+        case .unknown(let code): "Music did not respond (\(code))"
+        }
+    }
+
+    @ViewBuilder private var appleMusicButton: some View {
+        switch store.appleMusic.permission {
+        case .granted:
+            Button("Open Music") { store.appleMusic.openMusic() }
+                .buttonStyle(PillStyle(fill: SettingsStyle.gray, width: 66))
+        case .musicNotRunning:
+            Button("Open Music") { store.appleMusic.openMusic() }
+                .buttonStyle(PillStyle(fill: SettingsStyle.blue, width: 66))
+        case .notDetermined:
+            Button("Allow Access") { Task { await store.appleMusic.requestPermission() } }
+                .buttonStyle(PillStyle(fill: SettingsStyle.blue, width: 66))
+        case .denied, .unknown:
+            Button("Open Settings") { store.appleMusic.openPrivacySettings() }
+                .buttonStyle(PillStyle(fill: SettingsStyle.red, width: 66))
+        }
+    }
+
+    private var mascot: some View {
+        leadingColumn(spacing: 16) {
+            Text("Mascot").font(SettingsStyle.font(10, .semibold))
+            HStack(spacing: 0) {
+                mascotPreview.frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 6))
+                space(24.1)
+                Button("Choose GIF or Image…") { pickMascot() }
+                    .buttonStyle(PillStyle(fill: SettingsStyle.gray, width: 103.5))
+                space(24.2)
+                // Keeps its slot when hidden so the row doesn't shift.
+                Button("Remove") { store.resetCustomMascot() }
+                    .buttonStyle(PillStyle(fill: SettingsStyle.red, width: 39.5))
+                    .accessibilityLabel("Remove mascot")
+                    .shown(store.customMascotPath != nil)
+                space(30.4)
+                InfoButton(text: "Shown on the launcher next to the album art. Choose a GIF or an image.\n\nThe Squidd logo always stays; remove the mascot to show just the logo and album art.")
+            }
+            .frame(height: 28)
+        }
+    }
+
+    private var accent: some View {
+        leadingColumn(spacing: 19) {
+            Text("Pill Accent").font(SettingsStyle.font(10, .semibold))
+            HStack(spacing: 0) {
+                Text("Primary").font(SettingsStyle.font(9))
+                space(10.6)
+                ColorSwatch(color: store.rimPrimaryColor, label: "Primary") {
+                    store.setRimColors(primary: $0, accent: store.rimAccentColor)
+                }
+                space(10.5)
+                Text("Highlight").font(SettingsStyle.font(9))
+                space(10.6)
+                ColorSwatch(color: store.rimAccentColor, label: "Highlight") {
+                    store.setRimColors(primary: store.rimPrimaryColor, accent: $0)
+                }
+                space(23)
+                Button("Reset") { store.resetRimColors() }
+                    .buttonStyle(PillStyle(fill: SettingsStyle.red, width: 39.5))
+                    .accessibilityLabel("Reset pill accent colors")
+                    .shown(!store.rimIsDefault)
+                space(30.4)
+                InfoButton(text: "Colors of the glowing ring around the launcher pill while music plays. Click a square to pick a color.")
+            }
+            .frame(height: 25)
+        }
+    }
+
+    private var outline: some View {
+        leadingColumn(spacing: 0) {
+            Toggle("Show dashed outline around player", isOn: $store.showCardOutline)
+                .toggleStyle(SquareCheckboxStyle())
+                .font(SettingsStyle.font(8.8))
+                .frame(height: 15)
+        }
+    }
+
+    private var shortcuts: some View {
+        let errors = store.shortcutErrors + [store.preferenceError].compactMap { $0 }
+        return leadingColumn(spacing: 0) {
+            Text("Global Shortcuts").font(SettingsStyle.font(10, .semibold))
+            Color.clear.frame(width: 1, height: 14)
+            HStack(spacing: 28.7) {
+                Text("⌘/").font(SettingsStyle.font(13))
+                Text("shows or hides the player").font(SettingsStyle.font(9, .regular))
+            }
+            .frame(height: 18)
+            Color.clear.frame(width: 1, height: 10.7)
+            HStack(spacing: 0) {
+                Text("⌘⌥ W, A, S, D").font(SettingsStyle.font(13))
+                space(18)
+                Text("move the player up, left, down, and right").font(SettingsStyle.font(9, .regular))
+                space(5)
+                InfoButton(text: "Drag the launcher to move it. Drag any card corner to resize. Right-click either panel for its menu.")
+            }
+            .frame(height: 18)
+            ForEach(errors, id: \.self) { error in
+                Text(error).font(SettingsStyle.font(8, .regular)).foregroundStyle(SettingsStyle.errorText)
+                    .padding(.top, 4)
+            }
         }
     }
 
@@ -166,8 +471,21 @@ struct SettingsView: View {
             if let url = store.customMascotURL, let image = firstFrame(of: url) {
                 Image(nsImage: image).resizable().scaledToFit()
             } else {
-                RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary, style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                Image("Squidd-SI").renderingMode(.template).resizable().scaledToFit()
             }
+        }
+        .accessibilityHidden(true)
+    }
+
+    // MARK: Actions
+
+    private func copyRedirect() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(SpotifyAuth.redirectURI, forType: .string)
+        copiedRedirect = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            copiedRedirect = false
         }
     }
 
@@ -184,5 +502,135 @@ struct SettingsView: View {
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url { store.setCustomMascot(from: url) }
     }
+}
 
+private enum SettingsStyle {
+    static let cornerRadius: CGFloat = 40
+    static let panel = Color(white: 0.04)
+    // Translucent white rather than solid grey: matches the design over black and stays visible over glass.
+    static let field = Color.white.opacity(0.12)
+    static let gray = Color.white.opacity(0.15)
+    static let checkbox = Color.white.opacity(0.3)
+    static let blue = Color(red: 0.29, green: 0.66, blue: 1.0)
+    static let red = Color(red: 0.70, green: 0.13, blue: 0.12)
+    static let link = Color(red: 0.25, green: 0.63, blue: 1.0)
+    static let errorText = Color(red: 1.0, green: 0.42, blue: 0.40)
+
+    static func font(_ size: CGFloat, _ weight: Font.Weight = .medium) -> Font { .system(size: size, weight: weight) }
+}
+
+private extension View {
+    /// Top-leading corner at (x, y) within a design-positioned block.
+    func place(x: CGFloat, y: CGFloat) -> some View { offset(x: x, y: y) }
+
+    /// Leading edge at x, vertically centered on centerY, within a design-positioned block.
+    func place(x: CGFloat, centerY: CGFloat, height: CGFloat = 18) -> some View {
+        frame(height: height).offset(x: x, y: centerY - height / 2)
+    }
+
+    /// Hides a control but keeps its space, so neighbouring controls don't move.
+    func shown(_ visible: Bool) -> some View {
+        opacity(visible ? 1 : 0).disabled(!visible).accessibilityHidden(!visible)
+    }
+}
+
+private struct PillStyle: ButtonStyle {
+    var fill: Color
+    var width: CGFloat
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(SettingsStyle.font(7.75))
+            .lineLimit(1)
+            .foregroundStyle(.white)
+            .frame(width: width, height: 18)
+            .background(fill, in: Capsule())
+            .brightness(configuration.isPressed ? -0.08 : 0)
+            .opacity(isEnabled ? 1 : 0.45)
+            .contentShape(Capsule())
+    }
+}
+
+private struct SquareCheckboxStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: {
+            HStack(spacing: 9.5) {
+                RoundedRectangle(cornerRadius: 3.5)
+                    .fill(configuration.isOn ? SettingsStyle.blue : SettingsStyle.checkbox)
+                    .frame(width: 15, height: 15)
+                    .overlay {
+                        if configuration.isOn { Image(systemName: "checkmark").font(.system(size: 8.5, weight: .bold)) }
+                    }
+                configuration.label
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+    }
+}
+
+// Shows its note on hover; a click pins it open until the popover is dismissed.
+private struct InfoButton: View {
+    var text: String
+    @State private var hovering = false
+    @State private var pinned = false
+
+    var body: some View {
+        Button { pinned.toggle() } label: {
+            Image(systemName: "info.circle").font(.system(size: 11, weight: .medium))
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .popover(isPresented: Binding(get: { hovering || pinned }, set: { if !$0 { hovering = false; pinned = false } }),
+                 arrowEdge: .bottom) {
+            Text(text).font(.system(size: 11))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 240, alignment: .leading)
+                .padding(12)
+        }
+        .accessibilityLabel("More info")
+        .accessibilityHint(text)
+    }
+}
+
+private struct ColorSwatch: View {
+    var color: Color
+    var label: String
+    var onChange: (Color) -> Void
+
+    var body: some View {
+        Button { ColorPanelBridge.shared.open(initial: color, onChange: onChange) } label: {
+            RoundedRectangle(cornerRadius: 4).fill(color)
+                .frame(width: 25, height: 25)
+                .overlay { RoundedRectangle(cornerRadius: 4).strokeBorder(.white.opacity(0.15), lineWidth: 0.5) }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(label) color")
+    }
+}
+
+// Routes the shared color panel to whichever swatch opened it last.
+private final class ColorPanelBridge: NSObject {
+    static let shared = ColorPanelBridge()
+    private var onChange: ((Color) -> Void)?
+
+    func open(initial: Color, onChange: @escaping (Color) -> Void) {
+        let panel = NSColorPanel.shared
+        // Detach first so setting the starting color isn't reported to the previous swatch.
+        panel.setTarget(nil)
+        panel.setAction(nil)
+        panel.showsAlpha = false
+        panel.color = NSColor(initial)
+        self.onChange = onChange
+        panel.setTarget(self)
+        panel.setAction(#selector(colorChanged(_:)))
+        panel.isContinuous = true
+        panel.orderFront(nil)
+    }
+
+    @objc private func colorChanged(_ sender: NSColorPanel) { onChange?(Color(nsColor: sender.color)) }
 }
