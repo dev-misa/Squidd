@@ -1,0 +1,20 @@
+APP NAME CHANGE
+===============
+
+Old name: MisaSpace / "Misa's Space" (this file is the only place the old name is kept)
+New name: Squidd
+Date:     2026-09-11
+
+
+Everything is now Squidd
+------------------------
+- Repo folder:          ~/Squidd
+- Xcode project:        Squidd.xcodeproj
+- Target and scheme:    Squidd
+- Source folder:        Squidd/
+- App entry file:       Squidd/SquiddApp.swift (struct SquiddApp)
+- App bundle:           Squidd.app (PRODUCT_NAME = Squidd)
+- Bundle identifier:    com.squidd
+- Keychain service:     com.squidd.spotify
+- Menu bar, Settings, Quit item, accessibility labels, Spotify auth page
+- Docs, check scripts, temp build paths (/tmp/squidd-*)
