@@ -2,7 +2,7 @@ HOW TO SHARE SQUIDD (macOS app) WITH A FRIEND
 
 Context:
 - App name: Squidd (Xcode project: Squidd.xcodeproj)
-- Native macOS SwiftUI app, App Sandbox enabled, automatic code signing
+- Native macOS SwiftUI app, App Sandbox and Hardened Runtime enabled, automatic code signing
 - Minimum macOS version: macOS 26 (Tahoe). The friend's Mac must run macOS 26 or newer.
 - The app is NOT notarized, so macOS will show a security warning the first time it opens.
 - The app uses Spotify. The friend needs access to a Spotify developer app (mine or their own).
@@ -36,12 +36,12 @@ Option A - Use my Spotify app (easier for the friend):
 1. Go to https://developer.spotify.com/dashboard and open my app.
 2. Open Settings > User Management. Add my friend's name and the email they use for Spotify.
 3. Send them my Client ID. It's safe to share, since the app doesn't use a secret.
-4. They open Squidd Settings, paste the Client ID, click "Connect Spotify", and log in.
+4. They open Squidd Settings (click the Squidd logo on the pill, or use the menu bar icon), paste the Client ID, click "Connect", and log in.
 
 Option B - Friend makes their own Spotify app:
 1. They create an app at https://developer.spotify.com/dashboard
 2. They add this redirect URI exactly: http://127.0.0.1:8888/callback (must be 127.0.0.1, not localhost)
-3. They paste their own Client ID into Squidd Settings and click "Connect Spotify".
+3. They paste their own Client ID into Squidd Settings and click "Connect".
 4. The Spotify account that owns the developer app needs Premium.
 
 
@@ -50,3 +50,4 @@ GOOD TO KNOW
 - Skipping the security warning: with a paid Apple Developer account ($99/year), choose "Direct Distribution" in step 5 instead of "Copy App". Xcode then notarizes the app with Apple, and the friend can open it without steps 9-10.
 - Spotify user limit: while my Spotify app is in development mode, only the few people I add in User Management can connect.
 - If Spotify login fails because port 8888 is busy, quit whatever app is using that port (like the old Electron app) and try again.
+- Shortcuts: Command + / shows or hides the player, and Command + arrow keys move it. These work in every app while Squidd is running, so Command + arrow won't jump to the start or end of a line or page elsewhere until Squidd is quit.

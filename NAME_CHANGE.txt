@@ -36,7 +36,7 @@ Leftovers already deleted (2026-09-11):
 - Application Support/misaspace/misaspace-data.json.corrupt-* (stale broken backup)
 
 /Applications/Squidd.app replaced with the com.squidd build (2026-09-11).
-Spotify client ID, window position, outline setting and custom avatar were
+Spotify client ID, window position, outline setting and custom mascot were
 copied into ~/Library/Containers/com.squidd. Spotify needs one reconnect, and
 Launch at Login must be turned back on from the new app's menu.
 Deleted (no longer used by anything):
