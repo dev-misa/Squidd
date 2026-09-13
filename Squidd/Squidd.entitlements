@@ -4,15 +4,6 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<!-- Lets Squidd send Apple events to the Music app: read what is playing, and send play, pause, next,
-	     previous and seek. macOS still asks the user for Automation permission the first time, and the request is
-	     narrowed to com.apple.Music below. Required under both the sandbox and the hardened runtime. -->
-	<key>com.apple.security.automation.apple-events</key>
-	<true/>
-	<key>com.apple.security.temporary-exception.apple-events</key>
-	<array>
-		<string>com.apple.Music</string>
-	</array>
 	<!-- Spotify's Web API and album art. -->
 	<key>com.apple.security.network.client</key>
 	<true/>

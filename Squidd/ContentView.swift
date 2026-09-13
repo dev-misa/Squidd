@@ -18,6 +18,13 @@ enum WidgetMetrics {
     /// Without a mascot, extra trailing room keeps the art's corners as far from the pill's curve as the logo is.
     static func pillTrailing(artwork: Bool, mascot: Bool) -> CGFloat { artwork && !mascot ? 16 : pillLeading }
 
+    /// The logo's circle within a launcher panel of `size`. The pill is centered in the panel both ways, so this is
+    /// the same in flipped and unflipped coordinates.
+    static func logoRect(inLauncher size: CGSize, artwork: Bool, mascot: Bool) -> CGRect {
+        let pillMinX = (size.width - pillWidth(artwork: artwork, mascot: mascot)) / 2
+        return CGRect(x: pillMinX + pillLeading, y: (size.height - logoSize) / 2, width: logoSize, height: logoSize)
+    }
+
     static func pillWidth(artwork: Bool, mascot: Bool) -> CGFloat {
         var width = pillLeading + logoSize
         if artwork { width += pillSpacing + artSize }
@@ -28,14 +35,25 @@ enum WidgetMetrics {
 
 struct NativeGlass: ViewModifier {
     var radius: CGFloat
+    var appearance: WidgetAppearance = .light
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
+    /// The panels don't override their appearance, so this follows System Settings › Appearance live.
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var dark: Bool { appearance.isDark(in: colorScheme) }
 
     func body(content: Content) -> some View {
         if reduceTransparency || contrast == .increased {
             content.background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: radius))
         } else {
             content.background {
+                // Dark: the same clear glass under a deep tint, so white text stays readable over bright windows.
+                RoundedRectangle(cornerRadius: radius)
+                    .fill(.black.opacity(dark ? 0.5 : 0))
+                    .allowsHitTesting(false)
+            }
+            .background {
                 RoundedRectangle(cornerRadius: radius)
                     .fill(.ultraThinMaterial)
                     .opacity(0.2)
@@ -48,6 +66,20 @@ struct NativeGlass: ViewModifier {
                     .allowsHitTesting(false)
             }
         }
+    }
+}
+
+/// The dashed ring around the card: white in Light, near-black in Dark to match the tinted card.
+struct CardOutline: View {
+    var appearance: WidgetAppearance
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 29).inset(by: 1)
+            .stroke(appearance.isDark(in: colorScheme) ? Color(white: 0.08).opacity(0.85) : Color.white.opacity(0.85),
+                    style: StrokeStyle(lineWidth: 2, dash: [8, 7]))
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -94,7 +126,7 @@ struct ContentView: View {
         .padding(.leading, 17).padding(.trailing, 20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(2)
-        .modifier(NativeGlass(radius: 24))
+        .modifier(NativeGlass(radius: 24, appearance: store.widgetAppearance))
         .overlay { RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.5), lineWidth: 0.5).allowsHitTesting(false) }
         .foregroundStyle(reduceTransparency || contrast == .increased ? Color.primary : (store.ink == .dark ? Color(white: 0.07) : .white))
         .overlay {
@@ -103,11 +135,7 @@ struct ContentView: View {
         }
         .padding(6)
         .overlay {
-            if store.showCardOutline {
-                RoundedRectangle(cornerRadius: 29).inset(by: 1)
-                    .stroke(Color.white.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [8, 7]))
-                    .allowsHitTesting(false)
-            }
+            if store.showCardOutline { CardOutline(appearance: store.widgetAppearance) }
         }
     }
 
@@ -123,7 +151,7 @@ struct ContentView: View {
         case .pause: .pause
         case .play: .play
         }
-        return TransportButton(kind: kind, label: label, enabled: store.permits(command)) {
+        return TransportButton(kind: kind, label: label, enabled: store.offers(command)) {
             if kind == .previous || kind == .next { store.skip(previous: kind == .previous) } else { store.togglePlayback() }
         }
     }
@@ -142,11 +170,20 @@ struct LauncherView: View {
     var store: AppStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        let artwork = store.showsArtwork
-        let mascot = store.customMascotURL
+        let artwork = store.pillShowsArtwork
+        let mascot = store.pillMascotURL
         return HStack(spacing: WidgetMetrics.pillSpacing) {
-            bundledImage("Squiddv2", extension: "png", points: WidgetMetrics.logoSize)
-                .scaledToFill().frame(width: WidgetMetrics.logoSize, height: WidgetMetrics.logoSize).clipShape(Circle())
+            ZStack {
+                if store.showLogoCircle { Circle().fill(store.logoCircleColor) }
+                // Same share of the circle the logo took in the original app-icon artwork (700 of 1024 px).
+                SquiddLogo(primary: store.logoPrimaryColor, highlight: store.logoHighlightColor)
+                    .frame(width: WidgetMetrics.logoSize * 700 / 1024)
+            }
+            .frame(width: WidgetMetrics.logoSize, height: WidgetMetrics.logoSize)
+            // Pressed feedback: a slight shrink and fade, springing back on release. Reduce Motion keeps just the fade.
+            .scaleEffect(store.logoPressed && !reduceMotion ? 0.9 : 1)
+            .opacity(store.logoPressed ? 0.7 : 1)
+            .animation(.spring(duration: 0.2, bounce: 0.3), value: store.logoPressed)
             if artwork {
                 PreviewArtwork(store: store, radius: 10)
                     .frame(width: WidgetMetrics.artSize, height: WidgetMetrics.artSize)
@@ -161,7 +198,7 @@ struct LauncherView: View {
         .padding(.leading, WidgetMetrics.pillLeading)
         .padding(.trailing, WidgetMetrics.pillTrailing(artwork: artwork, mascot: mascot != nil))
         .frame(height: WidgetMetrics.pillHeight)
-        .modifier(NativeGlass(radius: WidgetMetrics.pillHeight / 2))
+        .modifier(NativeGlass(radius: WidgetMetrics.pillHeight / 2, appearance: store.widgetAppearance))
         // The circle stretches into the pill (and back) as album art and the mascot come and go.
         .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: artwork)
         .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: mascot)
@@ -172,17 +209,20 @@ struct LauncherView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Squidd launcher")
     }
+}
 
-    // Downsample once to the on-screen pixel size (2x for Retina); SwiftUI's live scaling of a large image looks jagged.
-    private func bundledImage(_ name: String, extension ext: String, points: CGFloat) -> Image {
-        let options = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: points * 2] as CFDictionary
-        if let url = Bundle.main.url(forResource: name, withExtension: ext),
-           let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-           let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options) {
-            let size = NSSize(width: CGFloat(cgImage.width) / 2, height: CGFloat(cgImage.height) / 2)
-            return Image(nsImage: NSImage(cgImage: cgImage, size: size)).resizable().interpolation(.high)
+/// The Squidd logo as two tintable vector layers, shared by the launcher pill and the Settings header.
+struct SquiddLogo: View {
+    var primary: Color
+    var highlight: Color
+
+    var body: some View {
+        ZStack {
+            Image("Squidd-Logo-Primary").renderingMode(.template).resizable().foregroundStyle(primary)
+            Image("Squidd-Logo-Highlight").renderingMode(.template).resizable().foregroundStyle(highlight)
         }
-        return Image(systemName: "music.note").resizable()
+        .aspectRatio(52.0 / 53.0, contentMode: .fit)
+        .accessibilityHidden(true)
     }
 }
 
@@ -244,7 +284,7 @@ struct PreviewArtwork: View {
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipShape(RoundedRectangle(cornerRadius: radius))
                 }
-                .id(store.artworkKey)
+                .id(ObjectIdentifier(artwork))
                 .transition(.opacity)
             } else if store.preview != .off && store.canControl {
                 RoundedRectangle(cornerRadius: radius)
@@ -254,7 +294,8 @@ struct PreviewArtwork: View {
                     .transition(.opacity)
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: store.artworkKey)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: store.artwork.map { ObjectIdentifier($0) })
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: store.sampleIndex)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: store.artwork != nil)
         .accessibilityLabel(store.artwork != nil ? "Album artwork" : (store.preview != .off && store.canControl ? "Preview artwork" : "No album artwork"))
     }

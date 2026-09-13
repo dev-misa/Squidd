@@ -6,30 +6,28 @@ enum SpotifyPlaybackState: Equatable {
 }
 
 @MainActor @Observable
-final class SpotifyPlayback: MusicSource {
+final class SpotifyPlayback {
     private(set) var state: SpotifyPlaybackState = .disconnected
     private(set) var snapshot: SpotifyPlaybackSnapshot?
     private(set) var elapsed: Double = 0
     private(set) var isPlaying = false
     private(set) var artwork: NSImage?
     private(set) var artworkKey = "idle"
+    /// Key of the image in `artwork`. Trails `artworkKey` while a replacement loads, since the old image stays up.
+    private(set) var loadedArtworkKey = "idle"
     private(set) var busy = false
     private(set) var message: String?
-    private(set) var lastActiveAt: Date?
-
-    @ObservationIgnored var didChange: (() -> Void)?
-
-    var kind: MusicSourceKind { .spotify }
-    /// A session exists, so this backend is worth offering even while nothing is playing.
-    var isAvailable: Bool { auth.hasSession }
-    var hasTrack: Bool { snapshot?.item != nil }
     private let auth: any SpotifySessionProviding
     private let api: any SpotifyPlaybackRequesting
     private let images: any SpotifyArtworkLoading
     private let pollInterval: Double
     private let idlePollInterval: Double
+    private let emptyPollInterval: Double
+    private let backgroundPollInterval: Double
+    private let backgroundIdlePollInterval: Double
     private let boostInterval: Double
     private var boostUntil: Date?
+    private var background = false
     private let reconciliationDelay: Double
     private var worker: Task<Void, Never>?
     private var sleeper: Task<Void, Never>?
@@ -45,6 +43,8 @@ final class SpotifyPlayback: MusicSource {
     private var stopped = false
     private var retryAt: Date?
     private var halted = false
+    /// When a quota halt lifts on its own. Kept apart from `resumeTask` so a suspension can reschedule it.
+    private var quotaResumeAt: Date?
     private var failures = 0
     private var commandMessageUntil: Date?
     private var lastTick = ProcessInfo.processInfo.systemUptime
@@ -52,12 +52,16 @@ final class SpotifyPlayback: MusicSource {
     private let defaults: UserDefaults?
     private static let retryKey = "spotifyPlaybackRetryAt"
 
-    /// `pollInterval` applies while a track plays and `idlePollInterval` while paused or idle, defaulting to three
-    /// times the playing rate; `boostInterval` is the quick rate used briefly after `boost()`. Each poll is one
-    /// request per running copy against the Spotify app's quota, so steady rates stay modest and bursts cover the
-    /// moments a change is likely.
+    /// `pollInterval` applies while a track plays and `idlePollInterval` while paused, defaulting to three times the
+    /// playing rate; `emptyPollInterval` applies when no track is loaded at all, defaulting to the paused rate.
+    /// While `setBackground(true)` is in effect — the card hidden, only the launcher showing — the two background
+    /// rates replace those, defaulting to three times the foreground ones. `boostInterval` is the quick rate used
+    /// briefly after `boost()`. Each poll is one request per running copy against the Spotify app's quota, so steady
+    /// rates stay modest and bursts cover the moments a change is likely.
     init(auth: any SpotifySessionProviding, api: (any SpotifyPlaybackRequesting)? = nil,
          images: (any SpotifyArtworkLoading)? = nil, pollInterval: Double = 5, idlePollInterval: Double? = nil,
+         emptyPollInterval: Double? = nil, backgroundPollInterval: Double? = nil,
+         backgroundIdlePollInterval: Double? = nil,
          boostInterval: Double = 1.5, reconciliationDelay: Double = 0.4, defaults: UserDefaults? = nil) {
         self.auth = auth
         self.defaults = defaults
@@ -65,6 +69,9 @@ final class SpotifyPlayback: MusicSource {
         self.images = images ?? SpotifyArtworkCache()
         self.pollInterval = max(0.05, pollInterval)
         self.idlePollInterval = max(0.05, idlePollInterval ?? pollInterval * 3)
+        self.emptyPollInterval = max(0.05, emptyPollInterval ?? self.idlePollInterval)
+        self.backgroundPollInterval = max(0.05, backgroundPollInterval ?? self.pollInterval * 3)
+        self.backgroundIdlePollInterval = max(0.05, backgroundIdlePollInterval ?? self.idlePollInterval * 3)
         self.boostInterval = max(0.05, boostInterval)
         self.reconciliationDelay = max(0, reconciliationDelay)
         auth.sessionDidChange = { [weak self] in self?.sessionChanged() }
@@ -90,10 +97,14 @@ final class SpotifyPlayback: MusicSource {
         }
     }
     var canRetry: Bool { auth.hasSession && !busy && !suspended && !previewing && (retryAt == nil || retryAt! <= Date()) }
-    func permits(_ command: PlaybackCommand) -> Bool {
-        auth.hasSession && !busy && !suspended && !previewing && !stopped && !halted &&
+    /// Whether `command` is available at all, regardless of a command already on its way. Buttons use this, so
+    /// sending one doesn't dim the others for the moment Spotify takes to confirm it.
+    func offers(_ command: PlaybackCommand) -> Bool {
+        auth.hasSession && !suspended && !previewing && !stopped && !halted &&
         [.playing, .paused, .commandError].contains(state) && snapshot?.permits(command) == true
     }
+    /// Whether `send` would accept `command` right now: offered, and no other command still in flight.
+    func permits(_ command: PlaybackCommand) -> Bool { !busy && offers(command) }
 
     func send(_ requested: PlaybackCommand) {
         guard permits(requested) else { return }
@@ -115,18 +126,27 @@ final class SpotifyPlayback: MusicSource {
         guard value != suspended else { return }
         suspended = value
         cancelWork(clear: false)
-        if !value { start() }
+        if !value { resumeAfterPause() }
     }
     func setPreviewing(_ value: Bool) {
         guard previewing != value else { return }
         previewing = value
         cancelWork(clear: true)
-        if !value { start() }
+        if !value { resumeAfterPause() }
     }
+    /// Pausing cancels the timer that lifts a quota halt, so re-arm it for whatever remains of the wait.
+    private func resumeAfterPause() {
+        if halted, let quotaResumeAt { scheduleQuotaResume(after: quotaResumeAt.timeIntervalSinceNow) }
+        start()
+    }
+    /// Slows steady polling while only the launcher is showing. It still wakes at the end of a playing track, so the
+    /// launcher's artwork keeps up; returning to the foreground takes effect after the current wait, or at once
+    /// with `boost()`.
+    func setBackground(_ value: Bool) { background = value }
     func retry() {
         guard canRetry else { return }
         resumeTask?.cancel(); resumeTask = nil
-        halted = false; failures = 0; retryAt = nil
+        halted = false; quotaResumeAt = nil; failures = 0; retryAt = nil
         message = nil; commandMessageUntil = nil
         if worker == nil { start() } else { sleeper?.cancel() }
     }
@@ -144,10 +164,11 @@ final class SpotifyPlayback: MusicSource {
         resumeTask?.cancel()
         let current = generation
         resumeTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
+            try? await Task.sleep(for: .seconds(max(0, seconds)))
             guard !Task.isCancelled, let self, self.generation == current, self.halted else { return }
             self.resumeTask = nil
             self.halted = false
+            self.quotaResumeAt = nil
             self.failures = 0
             self.message = nil
             self.start()
@@ -157,7 +178,7 @@ final class SpotifyPlayback: MusicSource {
 
     private func sessionChanged() {
         cancelWork(clear: true)
-        halted = false; failures = 0
+        halted = false; quotaResumeAt = nil; failures = 0
         // Rate limits apply to the Client ID, so a pending wait outlives relaunches and reconnects.
         retryAt = (defaults?.object(forKey: Self.retryKey) as? Date).flatMap { $0 > Date() ? $0 : nil }
         guard auth.hasSession else { return }
@@ -205,9 +226,13 @@ final class SpotifyPlayback: MusicSource {
     /// Wakes near the end of a playing track so the next one shows promptly; polls rarely when nothing changes.
     private var nextPollDelay: Double {
         if let boostUntil, boostUntil > Date() { return boostInterval }
-        guard isPlaying else { return idlePollInterval }
-        guard duration > 0 else { return pollInterval }
-        return min(pollInterval, max(2, duration - elapsed + 0.5))
+        guard isPlaying else {
+            if background { return backgroundIdlePollInterval }
+            return snapshot?.item == nil ? emptyPollInterval : idlePollInterval
+        }
+        let steady = background ? backgroundPollInterval : pollInterval
+        guard duration > 0 else { return steady }
+        return min(steady, max(2, duration - elapsed + 0.5))
     }
     private static func rateLimitMessage(until date: Date) -> String {
         let time = Calendar.current.isDateInToday(date) ? date.formatted(date: .omitted, time: .shortened)
@@ -260,14 +285,11 @@ final class SpotifyPlayback: MusicSource {
         }
         if value?.currently_playing_type == "ad" { message = "Advertisement · Controls unavailable" }
         else if value?.item == nil && value?.is_playing == true { message = "Spotify is playing · Metadata unavailable" }
-        if isPlaying { lastActiveAt = Date() }
         updateArtwork(value?.item?.artworkURL)
         reconcileClock()
-        didChange?()
     }
     private func handle(_ error: Error, command: Bool) {
         isPlaying = false; clock?.cancel(); clock = nil
-        defer { didChange?() }
         if command {
             state = .commandError
             commandMessageUntil = Date().addingTimeInterval(6)
@@ -286,6 +308,7 @@ final class SpotifyPlayback: MusicSource {
             // to an hour if it keeps failing. Access denial below stays halted, since waiting doesn't fix that.
             halted = true; state = .quotaExceeded
             let wait = min(3600, 600 * pow(2, Double(max(0, failures - 1))))
+            quotaResumeAt = Date().addingTimeInterval(wait)
             scheduleQuotaResume(after: wait)
             message = Self.quotaMessage(until: Date().addingTimeInterval(wait))
             return
@@ -321,23 +344,28 @@ final class SpotifyPlayback: MusicSource {
     private func updateArtwork(_ url: URL?) {
         let key = url?.absoluteString ?? "idle"
         let changed = key != artworkKey
-        guard changed || (artwork == nil && artworkTask == nil && (artworkRetryAt == nil || artworkRetryAt! <= Date())) else { return }
+        guard changed || (loadedArtworkKey != key && artworkTask == nil && (artworkRetryAt == nil || artworkRetryAt! <= Date())) else { return }
         artworkTask?.cancel(); artworkTask = nil
         if changed { artworkRetryAt = nil }
-        artworkKey = key; artwork = nil
-        guard let url, enabled else { return }
+        artworkKey = key
+        guard let url else { artwork = nil; loadedArtworkKey = "idle"; return }
+        guard enabled else { return }
+        // Keep the displayed image until its replacement is decoded.
         let current = generation
         artworkTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                if self.generation == current && self.artworkKey == key { self.artworkTask = nil }
+                if !Task.isCancelled && self.generation == current && self.artworkKey == key { self.artworkTask = nil }
             }
             do {
                 let cgImage = try await self.images.image(for: url)
                 guard !Task.isCancelled, self.generation == current, self.artworkKey == key else { return }
                 self.artwork = NSImage(cgImage: cgImage, size: .zero)
+                self.loadedArtworkKey = key
             } catch {
-                if self.generation == current && self.artworkKey == key {
+                if !Task.isCancelled && self.generation == current && self.artworkKey == key {
+                    self.artwork = nil
+                    self.loadedArtworkKey = "idle"
                     self.artworkRetryAt = Date().addingTimeInterval(30)
                 }
             }
@@ -352,9 +380,8 @@ final class SpotifyPlayback: MusicSource {
         resumeTask?.cancel(); resumeTask = nil
         pending = nil; busy = false; seekRollback = nil; isPlaying = false
         if clear {
-            snapshot = nil; elapsed = 0; artwork = nil; artworkKey = "idle"; artworkRetryAt = nil
+            snapshot = nil; elapsed = 0; artwork = nil; artworkKey = "idle"; loadedArtworkKey = "idle"; artworkRetryAt = nil
             message = nil; commandMessageUntil = nil; state = .disconnected
         } else if artwork == nil { artworkKey = "idle" }
-        didChange?()
     }
 }

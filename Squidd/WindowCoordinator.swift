@@ -61,6 +61,16 @@ final class WindowCoordinator: NSObject {
     private var pointerTimer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var distributedObservers: [NSObjectProtocol] = []
+    /// Reasons nobody can see the widget. Playback polling stops while any of them holds.
+    private enum Unseen: Hashable { case systemSleep, displaysAsleep, screenLocked, sessionInactive }
+    private var unseen: Set<Unseen> = []
+    /// Keyboard gliding: arrow shortcuts currently held, the player's unrounded position and its velocity (pt/s).
+    private var glideKeys: [UInt32: CGVector] = [:]
+    private var glideTimer: Timer?
+    private var glideOrigin = CGPoint.zero
+    private var glideVelocity = CGVector.zero
+    private var glideTick: CFTimeInterval = 0
     private let defaults = UserDefaults.standard
 
     init(store: AppStore) {
@@ -73,14 +83,14 @@ final class WindowCoordinator: NSObject {
         addInteraction(to: launcher, launcher: true)
         addInteraction(to: card, launcher: false)
         restore()
-        hotKeys.action = { [weak self] id in
+        hotKeys.action = { [weak self] id, pressed in
             guard let self else { return }
-            if id == 0 { self.toggleCard(); return }
-            let offsets: [UInt32: CGPoint] = [1: CGPoint(x: 0, y: 20), 2: CGPoint(x: -20, y: 0), 3: CGPoint(x: 0, y: -20), 4: CGPoint(x: 20, y: 0)]
-            guard let delta = offsets[id] else { return }
-            var frame = self.card.frame
-            frame.origin.x += delta.x; frame.origin.y += delta.y
-            self.place(frame, screen: self.bestScreen(for: frame))
+            if id == 0 { if pressed { self.toggleCard() }; return }
+            // Shortcut order: up, left, down, right. Screen y grows upward.
+            let directions: [UInt32: CGVector] = [1: CGVector(dx: 0, dy: 1), 2: CGVector(dx: -1, dy: 0),
+                                                  3: CGVector(dx: 0, dy: -1), 4: CGVector(dx: 1, dy: 0)]
+            guard let direction = directions[id] else { return }
+            self.setGlide(id, direction: pressed ? direction : nil)
         }
         store.shortcutErrors = hotKeys.register()
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
@@ -90,7 +100,7 @@ final class WindowCoordinator: NSObject {
         workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.store.sleeping = true; self?.store.reconcileClock()
-                self?.store.setSuspended(true)
+                self?.setUnseen(.systemSleep, true)
                 self?.store.spotify.setSuspended(true)
                 self?.pointerTimer?.invalidate(); self?.pointerTimer = nil
                 self?.savePlacement()
@@ -100,20 +110,48 @@ final class WindowCoordinator: NSObject {
             MainActor.assumeIsolated {
                 self?.store.sleeping = false; self?.store.reconcileClock()
                 self?.store.spotify.setSuspended(false)
-                self?.store.setSuspended(false)
-                self?.store.boostSources()
+                self?.setUnseen(.systemSleep, false)
                 self?.recoverDisplay(); self?.startPointerTracking()
             }
         })
-        // Either player coming to the front usually means playback is about to change, so catch it quickly.
-        workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
-            MainActor.assumeIsolated {
-                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-                guard let kind = MusicSourceKind.allCases.first(where: { $0.bundleIdentifier == app?.bundleIdentifier })
-                else { return }
-                self?.store.boost(kind)
+        // Displays asleep, a locked screen or another user's session: the Mac is awake but nobody sees the widget.
+        let unseenPairs: [(NSNotification.Name, NSNotification.Name, Unseen)] = [
+            (NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification, .displaysAsleep),
+            (NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.sessionDidBecomeActiveNotification, .sessionInactive),
+        ]
+        for (begin, end, reason) in unseenPairs {
+            for (name, active) in [(begin, true), (end, false)] {
+                workspaceObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.setUnseen(reason, active) }
+                })
             }
-        })
+        }
+        let distributed = DistributedNotificationCenter.default()
+        for (name, active) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
+            distributedObservers.append(distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setUnseen(.screenLocked, active) }
+            })
+        }
+        // Spotify launching or coming to the front usually means playback is about to change, so catch it quickly.
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didActivateApplicationNotification] {
+            workspaceObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                    guard app?.bundleIdentifier == "com.spotify.client" else { return }
+                    self?.store.boostPlayback()
+                }
+            })
+        }
+    }
+
+    /// Suspends polling when the first reason appears and resumes once the last one clears. Resuming polls at once,
+    /// then briefly quickly — kept short, since unlocking happens many times a day.
+    private func setUnseen(_ reason: Unseen, _ active: Bool) {
+        let wasSuspended = !unseen.isEmpty
+        if active { unseen.insert(reason) } else { unseen.remove(reason) }
+        guard wasSuspended != !unseen.isEmpty else { return }
+        store.setSuspended(active)
+        if !active { store.boostPlayback(for: 10) }
     }
 
     private func addInteraction(to panel: FloatingPanel, launcher: Bool) {
@@ -134,8 +172,59 @@ final class WindowCoordinator: NSObject {
         store.cardVisible.toggle()
         if store.cardVisible {
             card.orderFrontRegardless()
-            store.boostSources()
+            store.boostPlayback()
         } else { card.orderOut(nil) }
+    }
+
+    // MARK: Keyboard gliding
+
+    private static let glideSpeed: CGFloat = 160        // pt/s, constant for as long as an arrow is held
+    private static let glideResponse: CGFloat = 14      // how fast velocity follows the keys; higher is snappier
+
+    /// Starts, steers or releases a glide at one steady speed, easing in and out over a split second so it never
+    /// jerks; two arrows move the player diagonally.
+    func setGlide(_ id: UInt32, direction: CGVector?) {
+        if let direction { glideKeys[id] = direction } else { glideKeys.removeValue(forKey: id) }
+        guard glideTimer == nil, !glideKeys.isEmpty else { return }
+        glideOrigin = card.frame.origin
+        glideVelocity = .zero
+        glideTick = CACurrentMediaTime()
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stepGlide() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        glideTimer = timer
+    }
+
+    private func stepGlide() {
+        let now = CACurrentMediaTime()
+        let dt = CGFloat(min(0.05, now - glideTick))
+        glideTick = now
+        // Letting go of ⌘ before the arrow can leave the release unreported; no arrow steers without ⌘ held.
+        if !NSEvent.modifierFlags.contains(.command) { glideKeys.removeAll() }
+        var target = CGVector.zero
+        for direction in glideKeys.values {
+            target.dx += direction.dx * Self.glideSpeed
+            target.dy += direction.dy * Self.glideSpeed
+        }
+        let blend = min(1, dt * Self.glideResponse)
+        glideVelocity.dx += (target.dx - glideVelocity.dx) * blend
+        glideVelocity.dy += (target.dy - glideVelocity.dy) * blend
+        if glideKeys.isEmpty && hypot(glideVelocity.dx, glideVelocity.dy) < 5 {
+            glideTimer?.invalidate(); glideTimer = nil
+            return
+        }
+        // Something else moved the player mid-glide (a drag, a display change): carry on from where it is now.
+        if abs(card.frame.minX - glideOrigin.x) > 2 || abs(card.frame.minY - glideOrigin.y) > 2 { glideOrigin = card.frame.origin }
+        // Track the position unrounded, since windows land on whole pixels and slow steps would otherwise stall.
+        let proposed = CGPoint(x: glideOrigin.x + glideVelocity.dx * dt, y: glideOrigin.y + glideVelocity.dy * dt)
+        var frame = card.frame
+        frame.origin = proposed
+        place(frame, screen: bestScreen(for: frame))
+        // At a screen edge, drop the speed pushing into it so letting go there doesn't leave momentum behind.
+        let placed = card.frame.origin
+        if abs(placed.x - proposed.x) > 1 { glideVelocity.dx = 0; glideOrigin.x = placed.x } else { glideOrigin.x = proposed.x }
+        if abs(placed.y - proposed.y) > 1 { glideVelocity.dy = 0; glideOrigin.y = placed.y } else { glideOrigin.y = proposed.y }
     }
 
     func resetPosition() {
@@ -162,19 +251,21 @@ final class WindowCoordinator: NSObject {
         return WidgetMetrics.card
     }
 
-    func beginDrag(corner: CardCorner? = nil) {
+    func beginDrag(corner: CardCorner? = nil, onLogo: Bool = false) {
         pointerOrigin = NSEvent.mouseLocation
         originalFrame = card.frame
         resizeCorner = corner
         dragging = false
         interacting = true
         card.ignoresMouseEvents = false; launcher.ignoresMouseEvents = false
+        if onLogo { setLogoPressed(true) }
     }
 
     func updateDrag() {
         let pointer = NSEvent.mouseLocation
         let delta = CGPoint(x: pointer.x - pointerOrigin.x, y: pointer.y - pointerOrigin.y)
         dragging = dragging || abs(delta.x) > 4 || abs(delta.y) > 4
+        if dragging { setLogoPressed(false) } // It's a move, not a click.
         if let corner = resizeCorner {
             let screen = bestScreen(for: originalFrame)
             guard let screen else { return }
@@ -185,10 +276,34 @@ final class WindowCoordinator: NSObject {
         }
     }
 
-    func endDrag() {
-        if resizeCorner == nil && !dragging { toggleCard() }
+    /// `onLogo`: the press came up over the launcher's logo. A click there opens Settings; showing and hiding the
+    /// player is left to ⌘/, and a click elsewhere on the pill does nothing beyond a possible drag.
+    func endDrag(onLogo: Bool) {
+        if resizeCorner == nil && !dragging && onLogo { toggleSettings() }
+        setLogoPressed(false)
         interacting = false; dragging = false; resizeCorner = nil
         scheduleSave()
+    }
+
+    private var logoPressedAt: CFTimeInterval = 0
+    private var logoRelease: Task<Void, Never>?
+
+    /// Drives the logo's pressed look. A quick click would lift before the shrink is visible, so the press is held
+    /// for a minimum moment before springing back.
+    private func setLogoPressed(_ pressed: Bool) {
+        logoRelease?.cancel(); logoRelease = nil
+        if pressed {
+            logoPressedAt = CACurrentMediaTime()
+            store.logoPressed = true
+            return
+        }
+        guard store.logoPressed else { return }
+        let remaining = 0.12 - (CACurrentMediaTime() - logoPressedAt)
+        guard remaining > 0 else { store.logoPressed = false; return }
+        logoRelease = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
+            self?.store.logoPressed = false
+        }
     }
 
     private func place(_ frame: CGRect, screen: NSScreen?) {
@@ -256,7 +371,7 @@ final class WindowCoordinator: NSObject {
         guard !interacting else { return }
         // The pill only fills part of its panel, and shrinks when there's no album art or mascot; anywhere outside it
         // belongs to whatever is behind the launcher.
-        let pillWidth = WidgetMetrics.pillWidth(artwork: store.showsArtwork, mascot: store.customMascotURL != nil)
+        let pillWidth = WidgetMetrics.pillWidth(artwork: store.pillShowsArtwork, mascot: store.pillMascotURL != nil)
         let launcherRect = CGRect(origin: .zero, size: launcher.frame.size)
             .insetBy(dx: (launcher.frame.width - pillWidth) / 2, dy: (launcher.frame.height - WidgetMetrics.pillHeight) / 2)
         let cardRect = CGRect(origin: .zero, size: card.frame.size).insetBy(dx: 6, dy: 6)
@@ -264,6 +379,12 @@ final class WindowCoordinator: NSObject {
             let point = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
             panel.ignoresMouseEvents = !NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).contains(point)
         }
+    }
+
+    /// The logo's click: closes Settings when it's open in front, otherwise opens it or brings it forward — so a
+    /// Settings window buried behind another app's windows comes back rather than vanishing.
+    func toggleSettings() {
+        if let settings, settings.isVisible, NSApp.isActive { settings.orderOut(nil) } else { showSettings() }
     }
 
     func showSettings() {
@@ -297,7 +418,7 @@ final class WindowCoordinator: NSObject {
                 .appendingPathComponent("Squidd", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             // Preferences remain in UserDefaults; export a readable snapshot for inspection.
-            var snapshot: [String: Any] = ["inkOverrides": store.inkChoices]
+            var snapshot: [String: Any] = ["inkOverrides": store.inkChoices, "widgetAppearance": store.widgetAppearance.rawValue]
             if let size = defaults.array(forKey: "defaultPanelSize") { snapshot["defaultPanelSize"] = size }
             if let placement = defaults.data(forKey: "panelPlacement"), let value = try? JSONSerialization.jsonObject(with: placement) { snapshot["panelPlacement"] = value }
             try JSONSerialization.data(withJSONObject: snapshot, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("preferences-snapshot.json"), options: .atomic)
@@ -308,10 +429,12 @@ final class WindowCoordinator: NSObject {
     func stop() {
         saveTask?.cancel(); savePlacement()
         pointerTimer?.invalidate(); pointerTimer = nil
+        glideTimer?.invalidate(); glideTimer = nil; glideKeys = [:]
         hotKeys.stop(); store.stop()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         for observer in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
-        observers = []; workspaceObservers = []
+        for observer in distributedObservers { DistributedNotificationCenter.default().removeObserver(observer) }
+        observers = []; workspaceObservers = []; distributedObservers = []
     }
 }
 
@@ -336,27 +459,33 @@ final class PanelInteraction: NSView {
     override func resetCursorRects() {
         if isLauncher {
             // Match the pill, which narrows when there's no album art or mascot.
-            let width = coordinator.map { WidgetMetrics.pillWidth(artwork: $0.store.showsArtwork, mascot: $0.store.customMascotURL != nil) }
+            let width = coordinator.map { WidgetMetrics.pillWidth(artwork: $0.store.pillShowsArtwork, mascot: $0.store.pillMascotURL != nil) }
                 ?? WidgetMetrics.pillWidth(artwork: true, mascot: true)
             addCursorRect(bounds.insetBy(dx: (bounds.width - width) / 2, dy: (bounds.height - WidgetMetrics.pillHeight) / 2),
                           cursor: .openHand)
         }
         else { for corner in CardCorner.allCases { addCursorRect(cornerRect(corner), cursor: .crosshair) } }
     }
+    private func isOnLogo(_ event: NSEvent) -> Bool {
+        guard isLauncher, let store = coordinator?.store else { return false }
+        return WidgetMetrics.logoRect(inLauncher: bounds.size, artwork: store.pillShowsArtwork, mascot: store.pillMascotURL != nil)
+            .contains(convert(event.locationInWindow, from: nil))
+    }
     override func mouseDown(with event: NSEvent) {
         activeCorner = isLauncher ? nil : corner(at: convert(event.locationInWindow, from: nil))
-        if isLauncher || activeCorner != nil { coordinator?.beginDrag(corner: activeCorner) }
+        if isLauncher || activeCorner != nil { coordinator?.beginDrag(corner: activeCorner, onLogo: isOnLogo(event)) }
     }
     override func mouseDragged(with event: NSEvent) { coordinator?.updateDrag() }
-    override func mouseUp(with event: NSEvent) { coordinator?.endDrag(); activeCorner = nil }
+    override func mouseUp(with event: NSEvent) {
+        coordinator?.endDrag(onLogo: isOnLogo(event)); activeCorner = nil
+    }
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
         menu.autoenablesItems = false
         if isLauncher {
             add("Show / Hide Player", #selector(toggle), to: menu)
             add("Settings…", #selector(settings), to: menu)
-            add(coordinator?.store.activeKind == .appleMusic ? "Open Music" : "Open Spotify",
-                #selector(openPlayer), to: menu)
+            add("Open Spotify", #selector(openPlayer), to: menu)
             if coordinator?.store.spotify.state == .connecting {
                 add("Cancel Spotify Login", #selector(cancelSpotify), to: menu)
             } else if coordinator?.store.spotify.hasSession == true {
@@ -396,7 +525,7 @@ final class PanelInteraction: NSView {
         guard let auth = coordinator?.store.spotify, SpotifyAuth.validClientID(auth.clientID) else { return }
         auth.connect()
     }
-    @objc private func openPlayer() { coordinator?.store.openActiveApp() }
+    @objc private func openPlayer() { coordinator?.store.openSpotify() }
     @objc private func disconnectSpotify() { coordinator?.store.spotify.disconnect() }
     @objc private func cancelSpotify() { coordinator?.store.spotify.cancelLogin() }
     @objc private func settings() { coordinator?.showSettings() }
@@ -415,6 +544,6 @@ final class PanelInteraction: NSView {
     @objc private func quit() { NSApp.terminate(nil) }
     override func accessibilityIsIgnored() -> Bool { !isLauncher }
     override func accessibilityRole() -> NSAccessibility.Role? { isLauncher ? .button : nil }
-    override func accessibilityLabel() -> String? { isLauncher ? "Show or hide Squidd player. Drag to move." : nil }
-    override func accessibilityPerformPress() -> Bool { guard isLauncher else { return false }; coordinator?.toggleCard(); return true }
+    override func accessibilityLabel() -> String? { isLauncher ? "Open or close Squidd Settings. Drag to move; Command-slash shows or hides the player." : nil }
+    override func accessibilityPerformPress() -> Bool { guard isLauncher else { return false }; coordinator?.toggleSettings(); return true }
 }

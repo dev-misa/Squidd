@@ -174,28 +174,88 @@ struct PlaybackRim: View {
     var primaryColor: Color = AppStore.defaultRimPrimary
     var accentColor: Color = AppStore.defaultRimAccent
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var angle: Double = 0
+    @State private var elapsed: TimeInterval = 0
+    @State private var started: Date?
+
+    private var moving: Bool { playing && !reduceMotion }
 
     var body: some View {
-        let gradient = AngularGradient(stops: [.init(color: primaryColor, location: 0), .init(color: primaryColor, location: 1.0/3), .init(color: accentColor, location: 0.5), .init(color: primaryColor, location: 2.0/3), .init(color: primaryColor, location: 1)], center: .center, angle: .degrees(angle))
-        ZStack {
-            if playing {
-                Capsule().inset(by: -1).stroke(gradient, lineWidth: 2).blur(radius: 4).opacity(0.6)
-                Capsule().strokeBorder(gradient, lineWidth: 0.5)
-            } else { Capsule().strokeBorder(.white.opacity(0.5), lineWidth: 0.5) }
+        TimelineView(.animation(paused: !moving)) { context in
+            let time = elapsed + (started.map { max(0, context.date.timeIntervalSince($0)) } ?? 0)
+            let highlights = Canvas { context, size in
+                let rect = CGRect(origin: .zero, size: size).insetBy(dx: 0.75, dy: 0.75)
+                let outline = Capsule().path(in: rect)
+                let phase = (time / 8).truncatingRemainder(dividingBy: 1)
+                // Continuous shading avoids overlapping short strokes and visible stepping.
+                for index in 0..<2 {
+                    let position = (phase + Double(index) * 0.5).truncatingRemainder(dividingBy: 1)
+                    let center = perimeterPoint(position, in: rect)
+                    let strength = index == 0 ? 1.0 : 0.45
+                    context.stroke(outline, with: .radialGradient(
+                        Gradient(stops: [
+                            .init(color: accentColor.opacity(strength), location: 0),
+                            .init(color: accentColor.opacity(strength * 0.55), location: 0.4),
+                            .init(color: accentColor.opacity(0), location: 1)
+                        ]), center: center, startRadius: 0, endRadius: rect.height * 0.85),
+                        style: StrokeStyle(lineWidth: 1.2, lineCap: .round))
+                }
+            }
+
+            ZStack {
+                // A quiet glass edge stays visible while playback is paused.
+                Capsule().strokeBorder(
+                    LinearGradient(colors: [.white.opacity(0.55), .white.opacity(0.12), .white.opacity(0.3)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.6)
+                Capsule().inset(by: 1.5).strokeBorder(
+                    LinearGradient(colors: [.white.opacity(0.15), .clear, .black.opacity(0.12)],
+                                   startPoint: .top, endPoint: .bottom), lineWidth: 0.5)
+                ZStack {
+                    Capsule().strokeBorder(primaryColor.opacity(0.75), lineWidth: 0.8)
+                    Capsule().strokeBorder(primaryColor, lineWidth: 2)
+                        .blur(radius: 4).opacity(0.3)
+                    highlights.blur(radius: 3).opacity(0.65)
+                    highlights
+                }
+                .opacity(playing ? 1 : 0)
+            }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.45), value: playing)
         }
-        .task(id: playing && !reduceMotion) {
-            guard playing && !reduceMotion else { return }
-            var previous = ProcessInfo.processInfo.systemUptime
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .milliseconds(33)) } catch { return }
-                let now = ProcessInfo.processInfo.systemUptime
-                angle = (angle + (now - previous) * 90).truncatingRemainder(dividingBy: 360)
-                previous = now
+        // Preserve the light's position across pause/resume, without a polling task.
+        .onChange(of: moving, initial: true) { _, moving in
+            if moving {
+                started = Date()
+            } else if let started {
+                elapsed += max(0, Date().timeIntervalSince(started))
+                self.started = nil
             }
         }
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
+
+    /// Arc-length positioning keeps the highlights moving evenly across straights and curves.
+    private func perimeterPoint(_ fraction: Double, in rect: CGRect) -> CGPoint {
+        let radius = rect.height / 2
+        let straight = max(0, rect.width - rect.height)
+        let arc = CGFloat.pi * radius
+        var distance = CGFloat(fraction) * (2 * straight + 2 * arc)
+        if distance < straight {
+            return CGPoint(x: rect.minX + radius + distance, y: rect.minY)
+        }
+        distance -= straight
+        if distance < arc {
+            let angle = distance / radius - .pi / 2
+            return CGPoint(x: rect.maxX - radius + cos(angle) * radius, y: rect.midY + sin(angle) * radius)
+        }
+        distance -= arc
+        if distance < straight {
+            return CGPoint(x: rect.maxX - radius - distance, y: rect.maxY)
+        }
+        distance -= straight
+        let angle = distance / radius + .pi / 2
+        return CGPoint(x: rect.minX + radius + cos(angle) * radius, y: rect.midY + sin(angle) * radius)
+    }
+
 }
 
 struct PlaybackParticles: View {
@@ -259,8 +319,10 @@ struct TransportButton: View {
             pressed = true
             action()
         } label: {
+            // The press fills with the outline's own color — white, or dark grey under dark ink — not the gray primary.
             TransportGlyph(kind: kind)
-                .fill(pressed ? Color.primary : .clear)
+                .fill(.foreground)
+                .opacity(pressed ? 1 : 0)
                 .overlay { TransportGlyph(kind: kind).stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)) }
                 .frame(width: kind == .play || kind == .pause ? 22 : 33, height: 24)
                 .contentShape(Rectangle())

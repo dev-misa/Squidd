@@ -53,7 +53,7 @@ directory is unchanged. Observation macros require a build outside the agent san
 ## Offline interaction milestone implemented
 
 - Two retained nonactivating floating panels; player 304 × 180 visible, pill 141 × 52.
-- Launcher click toggles the card; group drag uses screen coordinates and a four-point threshold.
+- Launcher logo click opens or closes Settings (⌘/ shows or hides the card); group drag uses screen coordinates and a four-point threshold.
 - Four 14-point corner handles, opposite-corner anchoring, minimum visible size 270 × 158,
   and per-display clamping. Sizes/fonts/art do not uniformly scale.
 - Position and current size saved after a 400 ms debounce and on exit/sleep; explicit
@@ -62,7 +62,7 @@ directory is unchanged. Observation macros require a build outside the agent san
 - Pointer-position polling at 30 Hz makes transparent panel margins ignore mouse events
   and detects re-entry without event taps or screen recording. Paused during sleep;
   pinned during drag/resize. Rapid re-entry and Spaces still need hands-on checks.
-- Carbon global shortcuts: Command+/ and Command+Control+W/A/S/D. Registration failures
+- Carbon global shortcuts: Command+/ and Command+arrow keys (up, left, down, right). Registration failures
   appear in Settings. Unregistered on shutdown.
 - Launcher and menu bar actions, native Settings, login-item service with actual status,
   and per-artwork ink choices (preview uses isolated artwork keys).

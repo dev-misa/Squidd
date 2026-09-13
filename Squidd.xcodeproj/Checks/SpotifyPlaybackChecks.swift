@@ -113,7 +113,8 @@ struct SpotifyPlaybackChecks {
         try await checkArtwork()
         try await checkProgressAndStaleArtwork()
         try await checkPersistedRateLimit()
-        print("Live playback checks passed: metadata variants, restrictions, API commands/401/204/403/404/429, serialized polling, stale-response rejection, seek rollback, quota halt, logout, sleep, preview, artwork LRU and decoding.")
+        try await checkPollPacing()
+        print("Live playback checks passed: metadata variants, restrictions, API commands/401/204/403/404/429, serialized polling, stale-response rejection, seek rollback, quota halt, logout, sleep, preview, poll pacing, artwork LRU and decoding.")
     }
     @MainActor static func checkHTTP() async throws {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [PlaybackHTTPStub.self]
@@ -156,6 +157,8 @@ struct SpotifyPlaybackChecks {
         playback.send(.seek(80))
         playback.send(.next) // Ignored while a command is pending.
         assert(playback.elapsed >= 80 && playback.busy && api.sent.isEmpty)
+        // Buttons stay lit while a command is in flight, even though another one can't be sent yet.
+        assert(playback.offers(.next) && !playback.permits(.next))
         api.next = .success(try sample(80))
         api.release(.success(try sample(2))) // Predates the seek and must be discarded.
         try await waitUntil { !playback.busy }
@@ -250,6 +253,21 @@ struct SpotifyPlaybackChecks {
         images.complete(secondURL, image: bitmap.cgImage!)
         try await waitUntil { artPlayback.artwork != nil }
         assert(artPlayback.title == "Track two")
+        let previousArtwork = artPlayback.artwork
+        artAPI.next = .success(try sample(30, id: "three", artwork: firstURL.absoluteString))
+        try await waitUntil { images.pending[firstURL] != nil }
+        assert(artPlayback.artwork === previousArtwork) // Keep the cover throughout a slow download.
+        // Ink follows the cover on screen, so its key stays on the old image until the new one arrives.
+        assert(artPlayback.loadedArtworkKey == secondURL.absoluteString)
+        try await Task.sleep(for: .milliseconds(120)) // Repeated polls must not restart the request.
+        assert(artPlayback.artwork === previousArtwork)
+        images.complete(firstURL, image: bitmap.cgImage!)
+        try await waitUntil { artPlayback.artwork !== previousArtwork }
+        assert(artPlayback.artwork != nil && artPlayback.artworkKey == firstURL.absoluteString)
+        assert(artPlayback.loadedArtworkKey == firstURL.absoluteString)
+        artAPI.next = .success(try sample(40, id: "no-art"))
+        try await waitUntil { artPlayback.artworkKey == "idle" }
+        assert(artPlayback.artwork == nil) // Truly missing artwork still clears the cover.
         artAuth.hasSession = false
         assert(artPlayback.artwork == nil && artPlayback.snapshot == nil)
     }
@@ -276,6 +294,34 @@ struct SpotifyPlaybackChecks {
         defer { recovered.stop() }
         try await waitUntil { recovered.state == .playing }
         assert(defaults.object(forKey: "spotifyPlaybackRetryAt") == nil)
+    }
+    @MainActor static func checkPollPacing() async throws {
+        let auth = PlaybackTestSession(), api = PlaybackTestAPI()
+        let playback = SpotifyPlayback(auth: auth, api: api, images: EmptyArtwork(), pollInterval: 0.05,
+                                       idlePollInterval: 0.05, emptyPollInterval: 30, backgroundPollInterval: 30,
+                                       backgroundIdlePollInterval: 30, boostInterval: 0.05)
+        defer { playback.stop() }
+        // Nothing loaded: the slow empty rate applies even though paused tracks poll quickly.
+        try await waitUntil { playback.state == .idle }
+        var polls = api.polls
+        try await Task.sleep(for: .milliseconds(200))
+        assert(api.polls == polls)
+        // A boost interrupts the long wait, and a playing track then keeps the quick foreground rate.
+        api.next = .success(try sample())
+        playback.boost(for: 0.05)
+        try await waitUntil { playback.state == .playing }
+        polls = api.polls
+        try await waitUntil { api.polls >= polls + 3 }
+        // Card hidden: the in-progress short wait finishes, then polling drops to the background rate.
+        playback.setBackground(true)
+        try await Task.sleep(for: .milliseconds(150))
+        polls = api.polls
+        try await Task.sleep(for: .milliseconds(200))
+        assert(api.polls == polls && playback.state == .playing)
+        // Card shown again: the boost that accompanies it resumes quick polling.
+        playback.setBackground(false)
+        playback.boost(for: 0.05)
+        try await waitUntil { api.polls >= polls + 3 }
     }
 
 }

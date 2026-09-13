@@ -63,16 +63,14 @@ final class SettingsWindow: NSWindow {
     }
 }
 
-// Built from the Figma design (a 440 × 950 pt panel). The logo and title stay centered; everything below is
-// left-aligned so every line starts on one edge. Resizing only changes the space between sections, and the
-// minimum size always fits everything.
+// The content column stays centered in the panel; its headings and controls share a left edge.
+// Resizing preserves that column while distributing vertical space between sections.
 struct SettingsView: View {
     static let defaultSize = CGSize(width: 440, height: 690)
-    // 440 wide is the design width: the Spotify ID row needs 411 pt plus its left margin, so anything narrower clips.
+    // Keeps the widest controls comfortably inside the rounded panel.
     static let minimumSize = CGSize(width: 440, height: 690)
     fileprivate static let columnWidth: CGFloat = 440
-    /// Every line starts here, matching the Spotify logo's left edge in the design (x 62 of 440).
-    fileprivate static let leadingInset: CGFloat = 62
+    private static let contentWidth: CGFloat = 349
 
     @Bindable var store: AppStore
     var close: () -> Void
@@ -88,11 +86,12 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipShape(panelShape)
             .background { background }
-            .overlay(alignment: .topLeading) { closeButton.padding(.leading, 22).padding(.top, 19) }
             // Press and drag anywhere to move the panel; a plain click still reaches buttons and the text field.
             .simultaneousGesture(WindowDragGesture())
             .allowsWindowActivationEvents(true)
             .overlay { resizeHandles }
+            // Above the resize grips, so the close button always gets its own clicks.
+            .overlay(alignment: .topLeading) { closeButton.padding(.leading, 22).padding(.top, 19) }
             .foregroundStyle(.white)
             .environment(\.colorScheme, .dark)
             .onAppear { clientID = store.spotify.clientID }
@@ -109,7 +108,9 @@ struct SettingsView: View {
             gap
             spotifyConnect
             gap
-            appleMusicSection
+            appearance
+            gap
+            pillArtwork
             gap
             mascot
             gap
@@ -125,12 +126,12 @@ struct SettingsView: View {
 
     private var gap: some View { Spacer(minLength: 16) }
 
-    /// Lines stacked flush left, all starting on the same edge.
-    private func leadingColumn<Content: View>(spacing: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
+    /// Left-align every section inside the same centered content column.
+    private func centeredColumn<Content: View>(spacing: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: spacing) { content() }
             .fixedSize()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, Self.leadingInset)
+            .frame(width: Self.contentWidth, alignment: .leading)
+            .frame(maxWidth: .infinity)
     }
 
     /// Fixed horizontal space inside a row, taken from the design.
@@ -166,12 +167,12 @@ struct SettingsView: View {
 
     private var resizeHandles: some View {
         ZStack {
-            // Edges first; the corner handles sit on top of their ends.
+            // Edges first; the corner handles sit on top of their ends. The top-left corner has none: the close
+            // button lives there, and a grip around it turned near-misses into resizes.
             edgeHandle(.top, .top, .top)
             edgeHandle(.bottom, .bottom, .bottom)
             edgeHandle(.leading, .leading, .leading)
             edgeHandle(.trailing, .trailing, .trailing)
-            cornerHandle(.topLeading, .topLeading, .topLeading)
             cornerHandle(.topTrailing, .topTrailing, .topTrailing)
             cornerHandle(.bottomLeading, .bottomLeading, .bottomLeading)
             cornerHandle(.bottomTrailing, .bottomTrailing, .bottomTrailing)
@@ -186,12 +187,18 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
     }
 
-    /// A strip along one edge, stopping short of the corners so the corner handles keep their area.
+    /// Distance from the top-left corner kept free of resize grips: the close button (22–47 pt in) plus a margin.
+    private static let closeButtonClearance: CGFloat = 64
+
+    /// A strip along one edge, stopping short of the corners so the corner handles keep their area, and well short
+    /// of the close button where the top and leading edges meet.
     private func edgeHandle(_ handle: SettingsWindow.Handle, _ alignment: Alignment, _ position: FrameResizePosition) -> some View {
         let vertical = handle == .leading || handle == .trailing
+        let start = handle == .top || handle == .leading ? Self.closeButtonClearance : 36
         return grip(handle, position)
             .frame(width: vertical ? 8 : nil, height: vertical ? nil : 8)
-            .padding(vertical ? [.top, .bottom] : [.leading, .trailing], 36)
+            .padding(vertical ? .top : .leading, start)
+            .padding(vertical ? .bottom : .trailing, 36)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
     }
 
@@ -210,7 +217,8 @@ struct SettingsView: View {
 
     // Just the centered logo; it carries the panel's name for VoiceOver since there's no visible title.
     private var header: some View {
-        Image("Squidd-Red-Logo").resizable().frame(width: 52, height: 53)
+        SquiddLogo(primary: store.logoPrimaryColor, highlight: store.logoHighlightColor)
+            .frame(width: 52, height: 53)
             .frame(maxWidth: .infinity)
             .accessibilityLabel("Squidd Settings")
     }
@@ -219,7 +227,7 @@ struct SettingsView: View {
         store.spotify.message ?? (store.spotify.hasSession ? store.playback.message : nil)
     }
 
-    // Keeps the design's layout (x 62–411 of 440, y from the field's top), anchored to the panel's left edge.
+    // Preserve the field layout, then center its visible bounds within the panel.
     private var spotifyID: some View {
         let height: CGFloat = spotifyNote == nil ? 56 : 84
         return ZStack(alignment: .topLeading) {
@@ -271,13 +279,12 @@ struct SettingsView: View {
         }
         .frame(width: Self.columnWidth, height: height, alignment: .topLeading)
         .offset(x: -62)
-        .frame(width: 411 - 62, height: height, alignment: .topLeading)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, Self.leadingInset)
+        .frame(width: Self.contentWidth, height: height, alignment: .topLeading)
+        .frame(maxWidth: .infinity)
     }
 
     private var spotifyConnect: some View {
-        leadingColumn(spacing: 0) {
+        centeredColumn(spacing: 0) {
             HStack(spacing: 0) {
                 Text(SpotifyAuth.redirectURI).font(SettingsStyle.font(8.75)).lineLimit(1).textSelection(.enabled)
                 space(10)
@@ -318,73 +325,76 @@ struct SettingsView: View {
         store.spotify.state == .disconnected ? "Not Connected to Spotify" : store.spotify.status
     }
 
-    // MARK: Apple Music
-
-    /// Apple Music needs no account setup — only the macOS Automation permission that lets Squidd talk to the
-    /// Music app — so this section is a source picker plus whatever single step is outstanding.
-    private var appleMusicSection: some View {
-        leadingColumn(spacing: 14) {
-            Text("Now Playing Source").font(SettingsStyle.font(10, .semibold))
+    private var appearance: some View {
+        centeredColumn(spacing: 14) {
+            Text("Appearance").font(SettingsStyle.font(10, .semibold))
             HStack(spacing: 0) {
-                sourcePill(nil, "Automatic")
-                space(8)
-                sourcePill(.spotify, "Spotify")
-                space(8)
-                sourcePill(.appleMusic, "Apple Music")
-                space(12)
-                InfoButton(text: "Automatic follows whichever app is playing, and keeps showing the last one while both are paused.\n\nSpotify or Apple Music pins the card to that service.")
-            }
-            .frame(height: 18)
-            HStack(spacing: 0) {
-                Text(appleMusicStatus).font(SettingsStyle.font(8.75)).lineLimit(1).truncationMode(.tail)
-                    .frame(width: 196, alignment: .leading)
-                    .accessibilityIdentifier("appleMusicStatus")
+                Text("Logo").font(SettingsStyle.font(9, .semibold))
                 space(10)
-                appleMusicButton
+                logoSwatch("Primary", store.logoPrimaryColor) { store.logoPrimaryHex = $0.hexString }
+                space(8)
+                logoSwatch("Highlight", store.logoHighlightColor) { store.logoHighlightHex = $0.hexString }
+                space(8)
+                logoSwatch("Circle", store.logoCircleColor) { store.logoCircleHex = $0.hexString }
+                    .opacity(store.showLogoCircle ? 1 : 0.45)
+                    .disabled(!store.showLogoCircle)
+                space(10)
+                Button("Reset") { store.resetLogoColors() }
+                    .buttonStyle(PillStyle(fill: SettingsStyle.red, width: 39.5))
+                    .accessibilityLabel("Reset logo colors")
+                    .shown(!store.logoIsDefault)
                 space(12)
-                InfoButton(text: "Apple Music needs no Client ID or login. macOS asks once for permission to control the Music app; Squidd then shows and controls whatever Music is playing.\n\nWithout that permission the track still appears, but the buttons stay off.")
+                InfoButton(text: "Colors of the Squidd logo on the launcher pill and at the top of Settings. Primary is the headband and ear cups, Highlight the tentacles, and Circle the background behind the logo on the pill.")
+            }
+            .frame(height: 25)
+            Toggle("Show circle behind pill logo", isOn: $store.showLogoCircle)
+                .toggleStyle(SquareCheckboxStyle())
+                .font(SettingsStyle.font(8.8))
+                .frame(height: 15)
+            HStack(spacing: 0) {
+                appearancePill(.automatic)
+                space(8)
+                appearancePill(.light)
+                space(8)
+                appearancePill(.dark)
+                space(12)
+                InfoButton(text: "Light is the clear glass. Dark is a deeper version that stays readable over bright windows and web pages.\n\nAutomatic follows System Settings › Appearance.")
             }
             .frame(height: 18)
         }
     }
 
-    private func sourcePill(_ kind: MusicSourceKind?, _ label: String) -> some View {
-        let selected = store.sourcePreference == kind
-        return Button(label) { store.sourcePreference = kind }
-            .buttonStyle(PillStyle(fill: selected ? SettingsStyle.blue : SettingsStyle.gray, width: 66))
-            .accessibilityLabel("\(label) source")
+    private func logoSwatch(_ label: String, _ color: Color, _ onChange: @escaping (Color) -> Void) -> some View {
+        HStack(spacing: 0) {
+            Text(label).font(SettingsStyle.font(9))
+            space(8)
+            ColorSwatch(color: color, label: "Logo \(label.lowercased())", onChange: onChange)
+        }
+    }
+
+    private func appearancePill(_ option: WidgetAppearance) -> some View {
+        let selected = store.widgetAppearance == option
+        return Button(option.rawValue) { store.widgetAppearance = option }
+            .buttonStyle(PillStyle(fill: selected ? SettingsStyle.blue : SettingsStyle.gray, width: 59))
+            .accessibilityLabel("\(option.rawValue) appearance")
             .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
-    private var appleMusicStatus: String {
-        switch store.appleMusic.permission {
-        case .granted: store.appleMusic.status
-        case .notDetermined: "Permission needed to read and control Music"
-        case .denied: "Denied in Privacy & Security › Automation"
-        case .musicNotRunning: "Music isn’t running"
-        case .unknown(let code): "Music did not respond (\(code))"
-        }
-    }
-
-    @ViewBuilder private var appleMusicButton: some View {
-        switch store.appleMusic.permission {
-        case .granted:
-            Button("Open Music") { store.appleMusic.openMusic() }
-                .buttonStyle(PillStyle(fill: SettingsStyle.gray, width: 66))
-        case .musicNotRunning:
-            Button("Open Music") { store.appleMusic.openMusic() }
-                .buttonStyle(PillStyle(fill: SettingsStyle.blue, width: 66))
-        case .notDetermined:
-            Button("Allow Access") { Task { await store.appleMusic.requestPermission() } }
-                .buttonStyle(PillStyle(fill: SettingsStyle.blue, width: 66))
-        case .denied, .unknown:
-            Button("Open Settings") { store.appleMusic.openPrivacySettings() }
-                .buttonStyle(PillStyle(fill: SettingsStyle.red, width: 66))
+    private var pillArtwork: some View {
+        centeredColumn(spacing: 10) {
+            Toggle("Show album cover in pill", isOn: $store.showPillArtwork)
+                .toggleStyle(SquareCheckboxStyle())
+                .font(SettingsStyle.font(8.8))
+                .frame(height: 15)
+            Toggle("Show mascot in pill", isOn: $store.showMascot)
+                .toggleStyle(SquareCheckboxStyle())
+                .font(SettingsStyle.font(8.8))
+                .frame(height: 15)
         }
     }
 
     private var mascot: some View {
-        leadingColumn(spacing: 16) {
+        centeredColumn(spacing: 16) {
             Text("Mascot").font(SettingsStyle.font(10, .semibold))
             HStack(spacing: 0) {
                 mascotPreview.frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 6))
@@ -405,7 +415,7 @@ struct SettingsView: View {
     }
 
     private var accent: some View {
-        leadingColumn(spacing: 19) {
+        centeredColumn(spacing: 19) {
             Text("Pill Accent").font(SettingsStyle.font(10, .semibold))
             HStack(spacing: 0) {
                 Text("Primary").font(SettingsStyle.font(9))
@@ -432,7 +442,7 @@ struct SettingsView: View {
     }
 
     private var outline: some View {
-        leadingColumn(spacing: 0) {
+        centeredColumn(spacing: 0) {
             Toggle("Show dashed outline around player", isOn: $store.showCardOutline)
                 .toggleStyle(SquareCheckboxStyle())
                 .font(SettingsStyle.font(8.8))
@@ -442,7 +452,7 @@ struct SettingsView: View {
 
     private var shortcuts: some View {
         let errors = store.shortcutErrors + [store.preferenceError].compactMap { $0 }
-        return leadingColumn(spacing: 0) {
+        return centeredColumn(spacing: 0) {
             Text("Global Shortcuts").font(SettingsStyle.font(10, .semibold))
             Color.clear.frame(width: 1, height: 14)
             HStack(spacing: 28.7) {
@@ -452,7 +462,7 @@ struct SettingsView: View {
             .frame(height: 18)
             Color.clear.frame(width: 1, height: 10.7)
             HStack(spacing: 0) {
-                Text("⌘⌥ W, A, S, D").font(SettingsStyle.font(13))
+                Text("⌘ ↑ ← ↓ →").font(SettingsStyle.font(13))
                 space(18)
                 Text("move the player up, left, down, and right").font(SettingsStyle.font(9, .regular))
                 space(5)

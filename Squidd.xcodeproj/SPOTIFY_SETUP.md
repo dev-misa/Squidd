@@ -1,9 +1,5 @@
 # Spotify setup and live playback — native phases 3–4
 
-> Spotify is one of two backends. Apple Music needs no account or Client ID at all —
-> see [APPLE_MUSIC_SETUP.md](APPLE_MUSIC_SETUP.md). **Now Playing Source** in Settings
-> picks between them, or follows whichever is playing.
-
 This build connects your account and displays live track/episode metadata, shared
 artwork, progress and playback state. Previous, next, play/pause and seeking send
 commands to your active Spotify device. Playback preview remains separate sample

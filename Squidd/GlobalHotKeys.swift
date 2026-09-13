@@ -5,30 +5,34 @@ import Carbon
 final class GlobalHotKeys {
     private var handler: EventHandlerRef?
     private var keys: [EventHotKeyRef] = []
-    var action: ((UInt32) -> Void)?
+    /// Called with the shortcut's index and whether it went down (true) or came back up (false). Hot keys don't
+    /// auto-repeat, so holding one is a single press followed, eventually, by its release.
+    var action: ((UInt32, Bool) -> Void)?
 
     func register() -> [String] {
         stop()
-        var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        var events = [EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+                      EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))]
         let status = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
             guard let event, let context else { return OSStatus(eventNotHandledErr) }
             var key = EventHotKeyID()
             let result = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
                                            MemoryLayout<EventHotKeyID>.size, nil, &key)
             guard result == noErr else { return result }
-            let id = key.id
+            let id = key.id, pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
             MainActor.assumeIsolated {
-                Unmanaged<GlobalHotKeys>.fromOpaque(context).takeUnretainedValue().action?(id)
+                Unmanaged<GlobalHotKeys>.fromOpaque(context).takeUnretainedValue().action?(id, pressed)
             }
             return noErr
-        }, 1, &event, Unmanaged.passUnretained(self).toOpaque(), &handler)
+        }, events.count, &events, Unmanaged.passUnretained(self).toOpaque(), &handler)
         guard status == noErr else { return ["Cannot install shortcuts (\(status))."] }
         let bindings: [(UInt32, UInt32, String)] = [
             (UInt32(kVK_ANSI_Slash), UInt32(cmdKey), "⌘/"),
-            (UInt32(kVK_ANSI_W), UInt32(cmdKey | optionKey), "⌘⌥W"),
-            (UInt32(kVK_ANSI_A), UInt32(cmdKey | optionKey), "⌘⌥A"),
-            (UInt32(kVK_ANSI_S), UInt32(cmdKey | optionKey), "⌘⌥S"),
-            (UInt32(kVK_ANSI_D), UInt32(cmdKey | optionKey), "⌘⌥D")
+            // Global, so these take ⌘-arrow from every app (line/document jumps) while Squidd runs — the user's choice.
+            (UInt32(kVK_UpArrow), UInt32(cmdKey), "⌘↑"),
+            (UInt32(kVK_LeftArrow), UInt32(cmdKey), "⌘←"),
+            (UInt32(kVK_DownArrow), UInt32(cmdKey), "⌘↓"),
+            (UInt32(kVK_RightArrow), UInt32(cmdKey), "⌘→")
         ]
         var errors: [String] = []
         for (index, binding) in bindings.enumerated() {

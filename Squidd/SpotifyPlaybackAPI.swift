@@ -1,5 +1,9 @@
 import Foundation
 
+nonisolated enum PlaybackCommand: Equatable, Sendable {
+    case play, pause, previous, next, seek(Double)
+}
+
 
 struct SpotifyPlaybackSnapshot: Decodable, Sendable {
     struct Device: Decodable, Sendable {
