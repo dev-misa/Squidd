@@ -58,29 +58,64 @@ final class MascotFrames {
     private(set) var frames: [Frame] = []
     /// Average visual center of the frames, as a fraction of their height from the top.
     private(set) var visualCenterY = 0.5
+    /// True until the first load finishes, so the slot stays empty rather than flashing the fallback note.
+    private(set) var loading = true
     var index = 0
     var remaining: Double = 0
 
-    func load(customURL: URL?) {
-        guard let customURL, let source = CGImageSourceCreateWithURL(customURL as CFURL, nil) else {
-            frames = []; visualCenterY = 0.5; index = 0; remaining = 0; return
-        }
+    /// The last mascot decoded. The pill rebuilds this view every time the mascot is shown, and a long GIF takes the
+    /// better part of a second to decode, so showing it again reuses these frames instead. One entry: a newly chosen
+    /// mascot gets a new file name, so it replaces the old frames rather than piling up.
+    private static var cache: (url: URL, frames: [Frame], centerY: Double)?
+
+    /// Longest side frames are kept at: about three times the 35-point slot, so they stay sharp once cropped, while a
+    /// few hundred frames still fit in tens of megabytes.
+    nonisolated private static let framePixels = 200
+
+    func load(customURL: URL?) async {
+        guard let customURL else { apply([], centerY: 0.5); return }
+        if let cached = Self.cache, cached.url == customURL { apply(cached.frames, centerY: cached.centerY); return }
+        let decoded = await Task.detached(priority: .userInitiated) { Self.decode(customURL) }.value
+        guard !Task.isCancelled else { return }
+        let frames = decoded.frames.map { Frame(image: NSImage(cgImage: $0.image, size: .zero), delay: $0.delay) }
+        Self.cache = (customURL, frames, decoded.centerY)
+        apply(frames, centerY: decoded.centerY)
+    }
+
+    private func apply(_ frames: [Frame], centerY: Double) {
+        self.frames = frames
+        visualCenterY = centerY
+        index = 0
+        remaining = frames.first?.delay ?? 0.1
+        loading = false
+    }
+
+    /// Reads, shrinks and crops every frame. Runs off the main thread: it's the slow part of showing a mascot.
+    nonisolated private static func decode(_ url: URL) -> (frames: [(image: CGImage, delay: Double)], centerY: Double) {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return ([], 0.5) }
         let decoded: [(image: CGImage, delay: Double)] = (0..<CGImageSourceGetCount(source)).compactMap { index in
             guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { return nil }
             let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
             let gif = props?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
             let delay = (gif?[kCGImagePropertyGIFUnclampedDelayTime] as? Double) ?? (gif?[kCGImagePropertyGIFDelayTime] as? Double) ?? 0.1
-            return (image, max(0.02, delay))
+            return (shrunk(image), max(0.02, delay))
         }
         // One crop shared by every frame, so the visible content is centered without jittering between frames.
-        let layout = Self.visibleLayout(of: decoded.map(\.image))
-        frames = decoded.map { frame in
-            let image = layout.box.flatMap { frame.image.cropping(to: $0) } ?? frame.image
-            return Frame(image: NSImage(cgImage: image, size: .zero), delay: frame.delay)
-        }
-        visualCenterY = layout.centerY
-        index = 0
-        remaining = frames.first?.delay ?? 0.1
+        let layout = visibleLayout(of: decoded.map(\.image))
+        let cropped = decoded.map { frame in (layout.box.flatMap { frame.image.cropping(to: $0) } ?? frame.image, frame.delay) }
+        return (cropped, layout.centerY)
+    }
+
+    /// Redraws a frame no larger than `framePixels`, as a ready-to-draw bitmap.
+    nonisolated private static func shrunk(_ image: CGImage) -> CGImage {
+        let scale = min(1, Double(framePixels) / Double(max(image.width, image.height)))
+        let width = max(1, Int(Double(image.width) * scale)), height = max(1, Int(Double(image.height) * scale))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return image }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage() ?? image
     }
 
     /// Moves the frames so their average visual center, not their box center, sits mid-slot.
@@ -94,7 +129,7 @@ final class MascotFrames {
 
     /// Box around the non-transparent pixels of all frames (top-left pixel coordinates; nil when there is
     /// no transparent margin to trim), and the frames' average alpha-weighted center as a fraction of its height.
-    static func visibleLayout(of images: [CGImage]) -> (box: CGRect?, centerY: Double) {
+    nonisolated static func visibleLayout(of images: [CGImage]) -> (box: CGRect?, centerY: Double) {
         guard let first = images.first,
               images.allSatisfy({ $0.width == first.width && $0.height == first.height }) else { return (nil, 0.5) }
         // Measure on a small copy; single-pixel precision doesn't matter in a 35-point slot.
@@ -156,13 +191,14 @@ struct AnimatedMascotView: View {
         GeometryReader { slot in
             Group {
                 if !frames.frames.isEmpty { Image(nsImage: frames.frames[frames.index].image).resizable().scaledToFit() }
-                else { Image(systemName: "music.note") }
+                else if !frames.loading { Image(systemName: "music.note") }
             }
             .frame(width: slot.size.width, height: slot.size.height)
             .offset(y: frames.verticalOffset(in: slot.size))
         }
-        .task(id: customURL) { frames.load(customURL: customURL) }
-        .task(id: playing && !reduceMotion) {
+        .task(id: customURL) { await frames.load(customURL: customURL) }
+        // Restarts once frames arrive, since a first-time load finishes after playback may already be running.
+        .task(id: playing && !reduceMotion && !frames.frames.isEmpty) {
             if playing && !reduceMotion { await frames.run() }
         }
         .accessibilityHidden(true)

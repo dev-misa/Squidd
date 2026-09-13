@@ -18,11 +18,18 @@ enum WidgetMetrics {
     /// Without a mascot, extra trailing room keeps the art's corners as far from the pill's curve as the logo is.
     static func pillTrailing(artwork: Bool, mascot: Bool) -> CGFloat { artwork && !mascot ? 16 : pillLeading }
 
-    /// The logo's circle within a launcher panel of `size`. The pill is centered in the panel both ways, so this is
-    /// the same in flipped and unflipped coordinates.
-    static func logoRect(inLauncher size: CGSize, artwork: Bool, mascot: Bool) -> CGRect {
-        let pillMinX = (size.width - pillWidth(artwork: artwork, mascot: mascot)) / 2
-        return CGRect(x: pillMinX + pillLeading, y: (size.height - logoSize) / 2, width: logoSize, height: logoSize)
+    /// The pill's left edge within the launcher panel. Fixed, so the logo never moves and the pill grows and shrinks
+    /// to its right; this is where a full pill (logo, art and mascot) sits centered over the card.
+    static let pillInset: CGFloat = 14
+
+    /// The pill within a launcher panel of `size`. Vertically centered, so the same in flipped and unflipped views.
+    static func pillRect(inLauncher size: CGSize, artwork: Bool, mascot: Bool) -> CGRect {
+        CGRect(x: pillInset, y: (size.height - pillHeight) / 2, width: pillWidth(artwork: artwork, mascot: mascot), height: pillHeight)
+    }
+
+    /// The logo's circle within a launcher panel of `size`, the same in flipped and unflipped views.
+    static func logoRect(inLauncher size: CGSize) -> CGRect {
+        CGRect(x: pillInset + pillLeading, y: (size.height - logoSize) / 2, width: logoSize, height: logoSize)
     }
 
     static func pillWidth(artwork: Bool, mascot: Bool) -> CGFloat {
@@ -169,6 +176,11 @@ struct ArtworkPlaceholder: View {
 struct LauncherView: View {
     var store: AppStore
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// A critically damped spring: quick off the mark, a long soft settle, no overshoot.
+    private static let resize = Animation.smooth(duration: 0.45)
+    /// Album art and the mascot slide out from behind whatever sits to their left, and back behind it when hidden.
+    private static let slotTransition = AnyTransition.modifier(active: TuckedBehindNeighbor(progress: 0),
+                                                               identity: TuckedBehindNeighbor(progress: 1))
     var body: some View {
         let artwork = store.pillShowsArtwork
         let mascot = store.pillMascotURL
@@ -184,30 +196,54 @@ struct LauncherView: View {
             .scaleEffect(store.logoPressed && !reduceMotion ? 0.9 : 1)
             .opacity(store.logoPressed ? 0.7 : 1)
             .animation(.spring(duration: 0.2, bounce: 0.3), value: store.logoPressed)
+            // Each item stacks above the one to its right, so a sliding item passes behind its neighbor.
+            .zIndex(2)
             if artwork {
                 PreviewArtwork(store: store, radius: 10)
                     .frame(width: WidgetMetrics.artSize, height: WidgetMetrics.artSize)
-                    // Grows out of the logo's edge as the pill widens, rather than appearing at full size.
-                    .transition(.scale(scale: 0.6, anchor: .leading).combined(with: .opacity))
+                    .transition(Self.slotTransition)
+                    .zIndex(1)
             }
             if let mascot {
                 AnimatedMascotView(playing: store.isPlaying && !store.sleeping, customURL: mascot)
                     .frame(width: WidgetMetrics.mascotSize, height: WidgetMetrics.mascotSize)
+                    .transition(Self.slotTransition)
+                    .zIndex(0)
             }
         }
         .padding(.leading, WidgetMetrics.pillLeading)
         .padding(.trailing, WidgetMetrics.pillTrailing(artwork: artwork, mascot: mascot != nil))
         .frame(height: WidgetMetrics.pillHeight)
         .modifier(NativeGlass(radius: WidgetMetrics.pillHeight / 2, appearance: store.widgetAppearance))
-        // The circle stretches into the pill (and back) as album art and the mascot come and go.
-        .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: artwork)
-        .animation(reduceMotion ? nil : .smooth(duration: 0.35), value: mascot)
         .overlay { PlaybackRim(playing: store.isPlaying && !store.sleeping, primaryColor: store.rimPrimaryColor, accentColor: store.rimAccentColor) }
-        .padding(14)
-        // Fill the fixed launcher panel so the pill stays centered over the card at either width.
-        .frame(width: WidgetMetrics.launcher.width, height: WidgetMetrics.launcher.height)
+        .padding(.leading, WidgetMetrics.pillInset)
+        // Pinned to the panel's left edge, so the logo stays put and the pill only ever grows or shrinks rightward.
+        .frame(width: WidgetMetrics.launcher.width, height: WidgetMetrics.launcher.height, alignment: .leading)
+        // One transaction for the glass, the rim and the contents, so they all move together.
+        .animation(reduceMotion ? nil : Self.resize, value: artwork)
+        .animation(reduceMotion ? nil : Self.resize, value: mascot)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Squidd launcher")
+    }
+}
+
+/// A pill item's slide in and out. At 0 it sits small, exactly behind its left neighbor (the logo or the album art —
+/// both 40 pt wide, so the distance is the same either way); at 1 it's full size in its own slot, so it grows as it
+/// emerges and shrinks as it tucks away. Opacity rises only over the first quarter, so a leaving item stays solid
+/// until it's nearly hidden instead of fading out ahead of the pill.
+struct TuckedBehindNeighbor: ViewModifier, Animatable {
+    static let hiddenScale = 0.4
+    var progress: Double
+    nonisolated var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(Self.hiddenScale + (1 - Self.hiddenScale) * progress)
+            .offset(x: -(WidgetMetrics.logoSize + WidgetMetrics.pillSpacing) * (1 - progress))
+            .opacity(min(1, max(0, progress / 0.25)))
     }
 }
 

@@ -371,9 +371,8 @@ final class WindowCoordinator: NSObject {
         guard !interacting else { return }
         // The pill only fills part of its panel, and shrinks when there's no album art or mascot; anywhere outside it
         // belongs to whatever is behind the launcher.
-        let pillWidth = WidgetMetrics.pillWidth(artwork: store.pillShowsArtwork, mascot: store.pillMascotURL != nil)
-        let launcherRect = CGRect(origin: .zero, size: launcher.frame.size)
-            .insetBy(dx: (launcher.frame.width - pillWidth) / 2, dy: (launcher.frame.height - WidgetMetrics.pillHeight) / 2)
+        let launcherRect = WidgetMetrics.pillRect(inLauncher: launcher.frame.size, artwork: store.pillShowsArtwork,
+                                                  mascot: store.pillMascotURL != nil)
         let cardRect = CGRect(origin: .zero, size: card.frame.size).insetBy(dx: 6, dy: 6)
         for (panel, rect, radius) in [(launcher, launcherRect, WidgetMetrics.pillHeight / 2), (card, cardRect, CGFloat(24))] where panel.isVisible {
             let point = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
@@ -459,17 +458,16 @@ final class PanelInteraction: NSView {
     override func resetCursorRects() {
         if isLauncher {
             // Match the pill, which narrows when there's no album art or mascot.
-            let width = coordinator.map { WidgetMetrics.pillWidth(artwork: $0.store.pillShowsArtwork, mascot: $0.store.pillMascotURL != nil) }
-                ?? WidgetMetrics.pillWidth(artwork: true, mascot: true)
-            addCursorRect(bounds.insetBy(dx: (bounds.width - width) / 2, dy: (bounds.height - WidgetMetrics.pillHeight) / 2),
+            let store = coordinator?.store
+            addCursorRect(WidgetMetrics.pillRect(inLauncher: bounds.size, artwork: store?.pillShowsArtwork ?? true,
+                                                 mascot: store.map { $0.pillMascotURL != nil } ?? true),
                           cursor: .openHand)
         }
         else { for corner in CardCorner.allCases { addCursorRect(cornerRect(corner), cursor: .crosshair) } }
     }
     private func isOnLogo(_ event: NSEvent) -> Bool {
-        guard isLauncher, let store = coordinator?.store else { return false }
-        return WidgetMetrics.logoRect(inLauncher: bounds.size, artwork: store.pillShowsArtwork, mascot: store.pillMascotURL != nil)
-            .contains(convert(event.locationInWindow, from: nil))
+        guard isLauncher else { return false }
+        return WidgetMetrics.logoRect(inLauncher: bounds.size).contains(convert(event.locationInWindow, from: nil))
     }
     override func mouseDown(with event: NSEvent) {
         activeCorner = isLauncher ? nil : corner(at: convert(event.locationInWindow, from: nil))
