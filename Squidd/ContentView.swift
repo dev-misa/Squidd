@@ -177,13 +177,13 @@ struct LauncherView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// A critically damped spring: quick off the mark, a long soft settle, no overshoot.
     private static let resize = Animation.smooth(duration: 0.45)
-    /// Album art and the mascot slide out from behind whatever sits to their left, and back behind it when hidden.
-    private static let slotTransition = AnyTransition.modifier(active: TuckedBehindNeighbor(progress: 0),
-                                                               identity: TuckedBehindNeighbor(progress: 1))
+    /// The last mascot file shown, so a mascot whose file was just removed can still tuck away rather than vanish.
+    @State private var lastMascotURL: URL?
     var body: some View {
         let artwork = store.pillShowsArtwork
-        let mascot = store.pillMascotURL
-        return HStack(spacing: WidgetMetrics.pillSpacing) {
+        let mascot = store.pillMascotURL != nil
+        // Spacing belongs to the art and mascot slots, so a closed slot leaves no gap behind.
+        return HStack(spacing: 0) {
             ZStack {
                 if store.showLogoCircle { Circle().fill(store.logoCircleColor) }
                 // Same share of the circle the logo took in the original app-icon artwork (700 of 1024 px).
@@ -197,21 +197,19 @@ struct LauncherView: View {
             .animation(.spring(duration: 0.2, bounce: 0.3), value: store.logoPressed)
             // Each item stacks above the one to its right, so a sliding item passes behind its neighbor.
             .zIndex(2)
-            if artwork {
-                PreviewArtwork(store: store, radius: 10)
-                    .frame(width: WidgetMetrics.artSize, height: WidgetMetrics.artSize)
-                    .transition(Self.slotTransition)
-                    .zIndex(1)
-            }
-            if let mascot {
-                AnimatedMascotView(playing: store.isPlaying && !store.sleeping, customURL: mascot)
-                    .frame(width: WidgetMetrics.mascotSize, height: WidgetMetrics.mascotSize)
-                    .transition(Self.slotTransition)
-                    .zIndex(0)
-            }
+            PreviewArtwork(store: store, radius: 10)
+                .frame(width: WidgetMetrics.artSize, height: WidgetMetrics.artSize)
+                .modifier(PillSlot(progress: artwork ? 1 : 0, width: WidgetMetrics.artSize))
+                .zIndex(1)
+            AnimatedMascotView(playing: store.isPlaying && !store.sleeping && mascot,
+                               customURL: store.customMascotURL ?? lastMascotURL)
+                .frame(width: WidgetMetrics.mascotSize, height: WidgetMetrics.mascotSize)
+                .modifier(PillSlot(progress: mascot ? 1 : 0, width: WidgetMetrics.mascotSize))
+                .zIndex(0)
         }
+        .onChange(of: store.customMascotURL, initial: true) { _, url in if let url { lastMascotURL = url } }
         .padding(.leading, WidgetMetrics.pillLeading)
-        .padding(.trailing, WidgetMetrics.pillTrailing(artwork: artwork, mascot: mascot != nil))
+        .padding(.trailing, WidgetMetrics.pillTrailing(artwork: artwork, mascot: mascot))
         .frame(height: WidgetMetrics.pillHeight)
         .modifier(NativeGlass(radius: WidgetMetrics.pillHeight / 2, appearance: store.widgetAppearance))
         .overlay { PlaybackRim(playing: store.isPlaying && !store.sleeping, primaryColor: store.rimPrimaryColor, accentColor: store.rimAccentColor) }
@@ -225,13 +223,18 @@ struct LauncherView: View {
     }
 }
 
-/// A pill item's slide in and out. At 0 it sits small, exactly behind its left neighbor (the logo or the album art —
-/// both 40 pt wide, so the distance is the same either way); at 1 it's full size in its own slot, so it grows as it
+/// The album art's or the mascot's slot in the pill, opening and closing as `progress` goes between 1 and 0. The item
+/// stays in the pill's layout the whole time, so the pill, its neighbors and the sliding item move together; inserted
+/// and removed views instead kept the spot they started from while the re-centered pill moved on, so a leaving item
+/// slid out past the pill's left edge. At 0 the slot has no width and the item sits small, centered behind its left
+/// neighbor (the logo or the album art, both 40 pt wide); at 1 it's full size in its own slot, so it grows as it
 /// emerges and shrinks as it tucks away. Opacity rises only over the first quarter, so a leaving item stays solid
 /// until it's nearly hidden instead of fading out ahead of the pill.
-struct TuckedBehindNeighbor: ViewModifier, Animatable {
+struct PillSlot: ViewModifier, Animatable {
     static let hiddenScale = 0.4
     var progress: Double
+    /// The item's own width, not counting the spacing before it.
+    var width: CGFloat
     nonisolated var animatableData: Double {
         get { progress }
         set { progress = newValue }
@@ -240,8 +243,11 @@ struct TuckedBehindNeighbor: ViewModifier, Animatable {
     func body(content: Content) -> some View {
         content
             .scaleEffect(Self.hiddenScale + (1 - Self.hiddenScale) * progress)
-            .offset(x: -(WidgetMetrics.logoSize + WidgetMetrics.pillSpacing) * (1 - progress))
+            // Riding the slot's trailing edge puts the item's center half its width before the slot when closed;
+            // this moves it the rest of the way to the neighbor's center.
+            .offset(x: -(WidgetMetrics.logoSize - width) / 2 * (1 - progress))
             .opacity(min(1, max(0, progress / 0.25)))
+            .frame(width: (WidgetMetrics.pillSpacing + width) * progress, alignment: .trailing)
     }
 }
 
