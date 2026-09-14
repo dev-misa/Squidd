@@ -467,7 +467,10 @@ final class PanelInteraction: NSView {
     }
     private func isOnLogo(_ event: NSEvent) -> Bool {
         guard isLauncher else { return false }
-        return WidgetMetrics.logoRect(inLauncher: bounds.size).contains(convert(event.locationInWindow, from: nil))
+        let store = coordinator?.store
+        return WidgetMetrics.logoRect(inLauncher: bounds.size, artwork: store?.pillShowsArtwork ?? true,
+                                      mascot: store.map { $0.pillMascotURL != nil } ?? true)
+            .contains(convert(event.locationInWindow, from: nil))
     }
     override func mouseDown(with event: NSEvent) {
         activeCorner = isLauncher ? nil : corner(at: convert(event.locationInWindow, from: nil))

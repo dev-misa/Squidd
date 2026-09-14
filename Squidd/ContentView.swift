@@ -18,18 +18,17 @@ enum WidgetMetrics {
     /// Without a mascot, extra trailing room keeps the art's corners as far from the pill's curve as the logo is.
     static func pillTrailing(artwork: Bool, mascot: Bool) -> CGFloat { artwork && !mascot ? 16 : pillLeading }
 
-    /// The pill's left edge within the launcher panel. Fixed, so the logo never moves and the pill grows and shrinks
-    /// to its right; this is where a full pill (logo, art and mascot) sits centered over the card.
-    static let pillInset: CGFloat = 14
-
-    /// The pill within a launcher panel of `size`. Vertically centered, so the same in flipped and unflipped views.
+    /// The pill within a launcher panel of `size`. Centered both ways, so it sits over the middle of the card however
+    /// many items it holds, and is the same in flipped and unflipped views.
     static func pillRect(inLauncher size: CGSize, artwork: Bool, mascot: Bool) -> CGRect {
-        CGRect(x: pillInset, y: (size.height - pillHeight) / 2, width: pillWidth(artwork: artwork, mascot: mascot), height: pillHeight)
+        let width = pillWidth(artwork: artwork, mascot: mascot)
+        return CGRect(x: (size.width - width) / 2, y: (size.height - pillHeight) / 2, width: width, height: pillHeight)
     }
 
     /// The logo's circle within a launcher panel of `size`, the same in flipped and unflipped views.
-    static func logoRect(inLauncher size: CGSize) -> CGRect {
-        CGRect(x: pillInset + pillLeading, y: (size.height - logoSize) / 2, width: logoSize, height: logoSize)
+    static func logoRect(inLauncher size: CGSize, artwork: Bool, mascot: Bool) -> CGRect {
+        let pill = pillRect(inLauncher: size, artwork: artwork, mascot: mascot)
+        return CGRect(x: pill.minX + pillLeading, y: (size.height - logoSize) / 2, width: logoSize, height: logoSize)
     }
 
     static func pillWidth(artwork: Bool, mascot: Bool) -> CGFloat {
@@ -216,9 +215,8 @@ struct LauncherView: View {
         .frame(height: WidgetMetrics.pillHeight)
         .modifier(NativeGlass(radius: WidgetMetrics.pillHeight / 2, appearance: store.widgetAppearance))
         .overlay { PlaybackRim(playing: store.isPlaying && !store.sleeping, primaryColor: store.rimPrimaryColor, accentColor: store.rimAccentColor) }
-        .padding(.leading, WidgetMetrics.pillInset)
-        // Pinned to the panel's left edge, so the logo stays put and the pill only ever grows or shrinks rightward.
-        .frame(width: WidgetMetrics.launcher.width, height: WidgetMetrics.launcher.height, alignment: .leading)
+        // Centered in the panel, so a pill with only one or two items still sits over the middle of the card.
+        .frame(width: WidgetMetrics.launcher.width, height: WidgetMetrics.launcher.height)
         // One transaction for the glass, the rim and the contents, so they all move together.
         .animation(reduceMotion ? nil : Self.resize, value: artwork)
         .animation(reduceMotion ? nil : Self.resize, value: mascot)
