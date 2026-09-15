@@ -150,6 +150,10 @@ struct SettingsView: View {
             // Near-clear layer so empty panel areas still receive the drag.
             panelShape.fill(.white.opacity(0.001))
         }
+        // The glass draws its own shadow past the rounded edge, darker while the window is key. The square window
+        // cuts that shadow off at its corners, so keep everything inside the curve.
+        .compositingGroup()
+        .clipShape(panelShape)
     }
 
     private var closeButton: some View {
