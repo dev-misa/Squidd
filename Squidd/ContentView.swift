@@ -136,7 +136,7 @@ struct ContentView: View {
         .overlay { RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.5), lineWidth: 0.5).allowsHitTesting(false) }
         .foregroundStyle(reduceTransparency || contrast == .increased ? Color.primary : (store.ink == .dark ? Color(white: 0.07) : .white))
         .overlay {
-            PlaybackParticles(active: store.isPlaying && store.cardVisible && !store.sleeping,
+            PlaybackParticles(active: store.showMusicNotes && store.isPlaying && store.cardVisible && !store.sleeping,
                               store: store)
         }
         .padding(6)

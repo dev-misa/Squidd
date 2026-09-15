@@ -65,6 +65,7 @@ final class AppStore {
     var showLogoCircle: Bool { didSet { defaults.set(showLogoCircle, forKey: "showLogoCircle") } }
     var showPillArtwork: Bool { didSet { defaults.set(showPillArtwork, forKey: "showPillArtwork") } }
     var showMascot: Bool { didSet { defaults.set(showMascot, forKey: "showMascot") } }
+    var showMusicNotes: Bool { didSet { defaults.set(showMusicNotes, forKey: "showMusicNotes") } }
     // The logo's original colors: headband and ear cups, tentacles, and the black behind it on the pill.
     static let defaultLogoPrimary = Color(hex: "#8D0404") ?? Color(red: 0.55, green: 0.02, blue: 0.02)
     static let defaultLogoHighlight = Color(hex: "#E54B4B") ?? Color(red: 0.9, green: 0.3, blue: 0.3)
@@ -97,6 +98,7 @@ final class AppStore {
         showLogoCircle = defaults.object(forKey: "showLogoCircle") as? Bool ?? true
         showPillArtwork = defaults.object(forKey: "showPillArtwork") as? Bool ?? true
         showMascot = defaults.object(forKey: "showMascot") as? Bool ?? true
+        showMusicNotes = defaults.object(forKey: "showMusicNotes") as? Bool ?? true
     }
 
     func setSuspended(_ value: Bool) { playback.setSuspended(value) }

@@ -442,8 +442,12 @@ struct SettingsView: View {
     }
 
     private var outline: some View {
-        centeredColumn(spacing: 0) {
+        centeredColumn(spacing: 10) {
             Toggle("Show dashed outline around player", isOn: $store.showCardOutline)
+                .toggleStyle(SquareCheckboxStyle())
+                .font(SettingsStyle.font(8.8))
+                .frame(height: 15)
+            Toggle("Show music notes while playing", isOn: $store.showMusicNotes)
                 .toggleStyle(SquareCheckboxStyle())
                 .font(SettingsStyle.font(8.8))
                 .frame(height: 15)
